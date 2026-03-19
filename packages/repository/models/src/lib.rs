@@ -29,6 +29,7 @@ pub struct GithubUserSource {
     pub url: String,
     pub fingerprints: Vec<String>,
     pub last_refreshed_unix: u64,
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -38,11 +39,17 @@ pub struct GithubTeamSource {
     pub member_usernames: Vec<String>,
     pub fingerprints: Vec<String>,
     pub last_refreshed_unix: u64,
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
 pub struct RepositoryLocalConfig {
     pub agent_helper: Option<String>,
+    pub github_api_base: Option<String>,
+    pub github_web_base: Option<String>,
+    pub github_auth_mode: Option<String>,
+    pub github_private_source_hard_fail: Option<bool>,
 }
 
 impl Default for RepositoryManifest {

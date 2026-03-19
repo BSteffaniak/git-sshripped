@@ -69,6 +69,9 @@ repo key (raw bytes or 64-char hex).
 - `git-ssh-crypt add-user --github-keys-url <url>`
 - `git-ssh-crypt list-users [--verbose]`
 - `git-ssh-crypt remove-user --fingerprint <fp> [--force]`
+- `git-ssh-crypt revoke-user --fingerprint <fp> [--auto-reencrypt] [--json]`
+- `git-ssh-crypt revoke-user --github-user <user> [--all-keys-for-user] [--auto-reencrypt] [--json]`
+- `git-ssh-crypt revoke-user --org <org> --team <team> [--auto-reencrypt] [--json]`
 - `git-ssh-crypt add-github-user --username <user> [--auto-wrap]`
 - `git-ssh-crypt list-github-users [--verbose]`
 - `git-ssh-crypt remove-github-user --username <user> [--force]`
@@ -86,9 +89,15 @@ repo key (raw bytes or 64-char hex).
 - `git-ssh-crypt rotate-key [--auto-reencrypt]`
 - `git-ssh-crypt reencrypt`
 - `git-ssh-crypt migrate-from-git-crypt [--dry-run] [--reencrypt] [--verify] [--json]`
+- `git-ssh-crypt migrate-from-git-crypt ... [--write-report <path>]`
 - `git-ssh-crypt export-repo-key --out <path>`
 - `git-ssh-crypt import-repo-key --input <path>`
+- `git-ssh-crypt policy show|set|verify [--json]`
 - `git-ssh-crypt config set-agent-helper <path>`
+- `git-ssh-crypt config set-github-api-base <url>`
+- `git-ssh-crypt config set-github-web-base <url>`
+- `git-ssh-crypt config set-github-auth-mode <auto|gh|token|anonymous>`
+- `git-ssh-crypt config set-github-private-source-hard-fail <true|false>`
 - `git-ssh-crypt config show`
 
 ## Security notes

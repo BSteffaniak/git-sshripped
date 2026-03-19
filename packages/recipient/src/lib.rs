@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use git_ssh_crypt_recipient_models::{RecipientKey, RecipientSource};
 use reqwest::StatusCode;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, USER_AGENT};
 use sha2::{Digest, Sha256};
 
 const SUPPORTED_KEY_TYPES: [&str; 2] = ["ssh-ed25519", "ssh-rsa"];
@@ -26,6 +26,41 @@ pub enum GithubBackend {
     Rest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubAuthMode {
+    Auto,
+    Gh,
+    Token,
+    Anonymous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubFetchOptions {
+    pub api_base_url: String,
+    pub web_base_url: String,
+    pub auth_mode: GithubAuthMode,
+    pub private_source_hard_fail: bool,
+}
+
+impl Default for GithubFetchOptions {
+    fn default() -> Self {
+        Self {
+            api_base_url: "https://api.github.com".to_string(),
+            web_base_url: "https://github.com".to_string(),
+            auth_mode: GithubAuthMode::Auto,
+            private_source_hard_fail: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GithubFetchMetadata {
+    pub rate_limit_remaining: Option<u32>,
+    pub rate_limit_reset_unix: Option<u64>,
+    pub etag: Option<String>,
+    pub not_modified: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubUserKeys {
     pub username: String,
@@ -33,6 +68,19 @@ pub struct GithubUserKeys {
     pub keys: Vec<String>,
     pub backend: GithubBackend,
     pub authenticated: bool,
+    pub auth_mode: GithubAuthMode,
+    pub metadata: GithubFetchMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubTeamMembers {
+    pub org: String,
+    pub team: String,
+    pub members: Vec<String>,
+    pub backend: GithubBackend,
+    pub authenticated: bool,
+    pub auth_mode: GithubAuthMode,
+    pub metadata: GithubFetchMetadata,
 }
 
 fn fingerprint_for_public_key(key_type: &str, key_body: &str) -> String {
@@ -56,6 +104,66 @@ fn gh_installed() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|out| out.status.success())
+}
+
+fn parse_auth_mode(raw: &str) -> Result<GithubAuthMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(GithubAuthMode::Auto),
+        "gh" => Ok(GithubAuthMode::Gh),
+        "token" => Ok(GithubAuthMode::Token),
+        "anonymous" => Ok(GithubAuthMode::Anonymous),
+        other => bail!("unsupported github auth mode '{other}'; expected auto|gh|token|anonymous"),
+    }
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn fetch_options_from_env() -> Result<GithubFetchOptions> {
+    let mut options = GithubFetchOptions::default();
+
+    if let Ok(api_base) = std::env::var("GSC_GITHUB_API_BASE")
+        && !api_base.trim().is_empty()
+    {
+        options.api_base_url = api_base.trim_end_matches('/').to_string();
+    }
+    if let Ok(web_base) = std::env::var("GSC_GITHUB_WEB_BASE")
+        && !web_base.trim().is_empty()
+    {
+        options.web_base_url = web_base.trim_end_matches('/').to_string();
+    }
+    if let Ok(mode) = std::env::var("GSC_GITHUB_AUTH_MODE")
+        && !mode.trim().is_empty()
+    {
+        options.auth_mode = parse_auth_mode(&mode)?;
+    }
+    if let Some(hard_fail) = env_bool("GSC_GITHUB_PRIVATE_SOURCE_HARD_FAIL") {
+        options.private_source_hard_fail = hard_fail;
+    }
+
+    Ok(options)
+}
+
+fn github_web_keys_url(web_base_url: &str, username: &str) -> String {
+    format!("{}/{username}.keys", web_base_url.trim_end_matches('/'))
+}
+
+fn parse_rate_limit(headers: &reqwest::header::HeaderMap) -> (Option<u32>, Option<u64>) {
+    let remaining = headers
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let reset = headers
+        .get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    (remaining, reset)
 }
 
 fn gh_api_lines(path: &str, jq: &str, paginate: bool) -> Result<Vec<String>> {
@@ -86,22 +194,37 @@ fn gh_api_lines(path: &str, jq: &str, paginate: bool) -> Result<Vec<String>> {
         .collect())
 }
 
-fn rest_headers() -> Result<HeaderMap> {
+fn rest_headers(mode: GithubAuthMode, if_none_match: Option<&str>) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("git-ssh-crypt"));
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN")
-        && !token.trim().is_empty()
+    if let Some(etag) = if_none_match
+        && !etag.trim().is_empty()
     {
-        let value = format!("Bearer {}", token.trim());
-        let hv = HeaderValue::from_str(&value).context("invalid GITHUB_TOKEN header value")?;
-        headers.insert(AUTHORIZATION, hv);
+        let hv =
+            HeaderValue::from_str(etag.trim()).context("invalid If-None-Match header value")?;
+        headers.insert(IF_NONE_MATCH, hv);
+    }
+
+    if mode != GithubAuthMode::Anonymous {
+        if let Ok(token) = std::env::var("GITHUB_TOKEN")
+            && !token.trim().is_empty()
+        {
+            let value = format!("Bearer {}", token.trim());
+            let hv = HeaderValue::from_str(&value).context("invalid GITHUB_TOKEN header value")?;
+            headers.insert(AUTHORIZATION, hv);
+        } else if mode == GithubAuthMode::Token {
+            bail!("github auth mode 'token' requires GITHUB_TOKEN");
+        }
     }
 
     Ok(headers)
 }
 
-fn rest_authenticated() -> bool {
+fn rest_authenticated(mode: GithubAuthMode) -> bool {
+    if mode == GithubAuthMode::Anonymous {
+        return false;
+    }
     std::env::var("GITHUB_TOKEN")
         .map(|token| !token.trim().is_empty())
         .unwrap_or(false)
@@ -110,11 +233,13 @@ fn rest_authenticated() -> bool {
 fn rest_get_with_retry(
     client: &reqwest::blocking::Client,
     url: &str,
+    mode: GithubAuthMode,
+    if_none_match: Option<&str>,
 ) -> Result<reqwest::blocking::Response> {
     let mut attempts = 0_u8;
     loop {
         attempts = attempts.saturating_add(1);
-        let request = client.get(url).headers(rest_headers()?);
+        let request = client.get(url).headers(rest_headers(mode, if_none_match)?);
         let response = request.send();
 
         match response {
@@ -160,14 +285,35 @@ fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 }
 
 pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
-    if gh_installed() {
+    fetch_github_user_keys_with_options(username, &fetch_options_from_env()?, None)
+}
+
+pub fn fetch_github_user_keys_with_options(
+    username: &str,
+    options: &GithubFetchOptions,
+    if_none_match: Option<&str>,
+) -> Result<GithubUserKeys> {
+    let use_gh = match options.auth_mode {
+        GithubAuthMode::Auto => gh_installed(),
+        GithubAuthMode::Gh => {
+            if !gh_installed() {
+                bail!("github auth mode 'gh' requested but gh is not installed");
+            }
+            true
+        }
+        GithubAuthMode::Token | GithubAuthMode::Anonymous => false,
+    };
+
+    if use_gh {
         let keys = gh_api_lines(&format!("users/{username}/keys"), ".[].key", true)?;
         return Ok(GithubUserKeys {
             username: username.to_string(),
-            url: format!("https://github.com/{username}.keys"),
+            url: github_web_keys_url(&options.web_base_url, username),
             keys,
             backend: GithubBackend::Gh,
             authenticated: true,
+            auth_mode: options.auth_mode,
+            metadata: GithubFetchMetadata::default(),
         });
     }
 
@@ -176,13 +322,49 @@ pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
         .context("failed to build reqwest client")?;
     let mut keys = Vec::new();
     let mut next = Some(format!(
-        "https://api.github.com/users/{username}/keys?per_page=100"
+        "{}/users/{username}/keys?per_page=100",
+        options.api_base_url.trim_end_matches('/'),
     ));
+    let mut metadata = GithubFetchMetadata::default();
+    let mut applied_etag = false;
 
     while let Some(url) = next {
-        let resp = rest_get_with_retry(&client, &url)
+        let current_if_none_match = if !applied_etag { if_none_match } else { None };
+        let resp = rest_get_with_retry(&client, &url, options.auth_mode, current_if_none_match)
             .with_context(|| format!("failed to fetch GitHub user keys for {username}"))?;
+        if resp.status() == StatusCode::NOT_MODIFIED {
+            metadata.not_modified = true;
+            return Ok(GithubUserKeys {
+                username: username.to_string(),
+                url: github_web_keys_url(&options.web_base_url, username),
+                keys: Vec::new(),
+                backend: GithubBackend::Rest,
+                authenticated: rest_authenticated(options.auth_mode),
+                auth_mode: options.auth_mode,
+                metadata,
+            });
+        }
+        if options.private_source_hard_fail
+            && (resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN)
+        {
+            bail!(
+                "GitHub user keys request failed for {username} (status {}); provide GITHUB_TOKEN or gh auth",
+                resp.status()
+            );
+        }
+
         let headers = resp.headers().clone();
+        if !applied_etag {
+            metadata.etag = headers
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string);
+            applied_etag = true;
+        }
+        let (remaining, reset) = parse_rate_limit(&headers);
+        metadata.rate_limit_remaining = remaining;
+        metadata.rate_limit_reset_unix = reset;
+
         let resp = resp
             .error_for_status()
             .with_context(|| format!("GitHub user keys request failed for {username}"))?;
@@ -202,10 +384,12 @@ pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
 
     Ok(GithubUserKeys {
         username: username.to_string(),
-        url: format!("https://github.com/{username}.keys"),
+        url: github_web_keys_url(&options.web_base_url, username),
         keys,
         backend: GithubBackend::Rest,
-        authenticated: rest_authenticated(),
+        authenticated: rest_authenticated(options.auth_mode),
+        auth_mode: options.auth_mode,
+        metadata,
     })
 }
 
@@ -213,13 +397,43 @@ pub fn fetch_github_team_members(
     org: &str,
     team: &str,
 ) -> Result<(Vec<String>, GithubBackend, bool)> {
-    if gh_installed() {
+    let fetched =
+        fetch_github_team_members_with_options(org, team, &fetch_options_from_env()?, None)?;
+    Ok((fetched.members, fetched.backend, fetched.authenticated))
+}
+
+pub fn fetch_github_team_members_with_options(
+    org: &str,
+    team: &str,
+    options: &GithubFetchOptions,
+    if_none_match: Option<&str>,
+) -> Result<GithubTeamMembers> {
+    let use_gh = match options.auth_mode {
+        GithubAuthMode::Auto => gh_installed(),
+        GithubAuthMode::Gh => {
+            if !gh_installed() {
+                bail!("github auth mode 'gh' requested but gh is not installed");
+            }
+            true
+        }
+        GithubAuthMode::Token | GithubAuthMode::Anonymous => false,
+    };
+
+    if use_gh {
         let members = gh_api_lines(
             &format!("orgs/{org}/teams/{team}/members"),
             ".[].login",
             true,
         )?;
-        return Ok((members, GithubBackend::Gh, true));
+        return Ok(GithubTeamMembers {
+            org: org.to_string(),
+            team: team.to_string(),
+            members,
+            backend: GithubBackend::Gh,
+            authenticated: true,
+            auth_mode: options.auth_mode,
+            metadata: GithubFetchMetadata::default(),
+        });
     }
 
     let client = reqwest::blocking::Client::builder()
@@ -227,15 +441,34 @@ pub fn fetch_github_team_members(
         .context("failed to build reqwest client")?;
     let mut members = Vec::new();
     let mut next = Some(format!(
-        "https://api.github.com/orgs/{org}/teams/{team}/members?per_page=100"
+        "{}/orgs/{org}/teams/{team}/members?per_page=100",
+        options.api_base_url.trim_end_matches('/'),
     ));
-    let authenticated = rest_authenticated();
+    let authenticated = rest_authenticated(options.auth_mode);
+    let mut metadata = GithubFetchMetadata::default();
+    let mut applied_etag = false;
 
     while let Some(url) = next {
-        let resp = rest_get_with_retry(&client, &url)
+        let current_if_none_match = if !applied_etag { if_none_match } else { None };
+        let resp = rest_get_with_retry(&client, &url, options.auth_mode, current_if_none_match)
             .with_context(|| format!("failed to fetch GitHub team members for {org}/{team}"))?;
 
-        if !resp.status().is_success() {
+        if resp.status() == StatusCode::NOT_MODIFIED {
+            metadata.not_modified = true;
+            return Ok(GithubTeamMembers {
+                org: org.to_string(),
+                team: team.to_string(),
+                members: Vec::new(),
+                backend: GithubBackend::Rest,
+                authenticated,
+                auth_mode: options.auth_mode,
+                metadata,
+            });
+        }
+
+        if options.private_source_hard_fail
+            && (resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN)
+        {
             bail!(
                 "GitHub team members request failed for {org}/{team} (status {}); this requires authenticated access via GITHUB_TOKEN or gh auth",
                 resp.status()
@@ -243,6 +476,16 @@ pub fn fetch_github_team_members(
         }
 
         let headers = resp.headers().clone();
+        if !applied_etag {
+            metadata.etag = headers
+                .get(ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string);
+            applied_etag = true;
+        }
+        let (remaining, reset) = parse_rate_limit(&headers);
+        metadata.rate_limit_remaining = remaining;
+        metadata.rate_limit_reset_unix = reset;
         let text = resp
             .text()
             .context("failed to read GitHub team members response")?;
@@ -257,7 +500,15 @@ pub fn fetch_github_team_members(
         next = parse_next_link(&headers);
     }
 
-    Ok((members, GithubBackend::Rest, authenticated))
+    Ok(GithubTeamMembers {
+        org: org.to_string(),
+        team: team.to_string(),
+        members,
+        backend: GithubBackend::Rest,
+        authenticated,
+        auth_mode: options.auth_mode,
+        metadata,
+    })
 }
 
 #[must_use]
@@ -358,7 +609,19 @@ pub fn add_recipients_from_github_username(
     repo_root: &Path,
     username: &str,
 ) -> Result<Vec<RecipientKey>> {
-    let fetched = fetch_github_user_keys(username)?;
+    add_recipients_from_github_username_with_options(
+        repo_root,
+        username,
+        &fetch_options_from_env()?,
+    )
+}
+
+pub fn add_recipients_from_github_username_with_options(
+    repo_root: &Path,
+    username: &str,
+    options: &GithubFetchOptions,
+) -> Result<Vec<RecipientKey>> {
+    let fetched = fetch_github_user_keys_with_options(username, options, None)?;
     let mut added = Vec::new();
     for line in fetched.keys.iter().filter(|line| !line.trim().is_empty()) {
         let recipient = add_recipient_from_public_key(
@@ -380,15 +643,29 @@ pub fn add_recipients_from_github_source(
     url: &str,
     username: Option<String>,
 ) -> Result<Vec<RecipientKey>> {
+    add_recipients_from_github_source_with_options(
+        repo_root,
+        url,
+        username,
+        &fetch_options_from_env()?,
+    )
+}
+
+pub fn add_recipients_from_github_source_with_options(
+    repo_root: &Path,
+    url: &str,
+    username: Option<String>,
+    options: &GithubFetchOptions,
+) -> Result<Vec<RecipientKey>> {
     if let Some(user) = username.as_deref() {
-        return add_recipients_from_github_username(repo_root, user);
+        return add_recipients_from_github_username_with_options(repo_root, user, options);
     }
 
     let text = reqwest::blocking::Client::builder()
         .build()
         .context("failed to build reqwest client")?
         .get(url)
-        .headers(rest_headers()?)
+        .headers(rest_headers(options.auth_mode, None)?)
         .send()
         .with_context(|| format!("failed to GET {url}"))?
         .error_for_status()

@@ -14,11 +14,12 @@ use git_ssh_crypt_cli_models::InitOptions;
 use git_ssh_crypt_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
 use git_ssh_crypt_filter::{clean, diff, is_protected_path, smudge};
 use git_ssh_crypt_recipient::{
-    add_recipient_from_public_key, add_recipients_from_github_keys,
-    add_recipients_from_github_source, add_recipients_from_github_username,
-    fetch_github_team_members, fetch_github_user_keys, list_recipients,
-    remove_recipient_by_fingerprint, remove_recipients_by_fingerprints,
-    wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
+    GithubAuthMode, GithubFetchOptions, add_recipient_from_public_key,
+    add_recipients_from_github_source_with_options,
+    add_recipients_from_github_username_with_options, fetch_github_team_members_with_options,
+    fetch_github_user_keys_with_options, list_recipients, remove_recipient_by_fingerprint,
+    remove_recipients_by_fingerprints, wrap_repo_key_for_all_recipients,
+    wrap_repo_key_for_recipient, wrapped_store_dir,
 };
 use git_ssh_crypt_recipient_models::{RecipientKey, RecipientSource};
 use git_ssh_crypt_repository::{
@@ -64,7 +65,31 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     SetAgentHelper { path: String },
+    SetGithubApiBase { url: String },
+    SetGithubWebBase { url: String },
+    SetGithubAuthMode { mode: String },
+    SetGithubPrivateSourceHardFail { enabled: String },
     Show,
+}
+
+#[derive(Debug, Subcommand)]
+enum PolicyCommand {
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    Verify {
+        #[arg(long)]
+        json: bool,
+    },
+    Set {
+        #[arg(long)]
+        min_recipients: Option<usize>,
+        #[arg(long = "allow-key-type")]
+        allow_key_types: Vec<String>,
+        #[arg(long)]
+        require_doctor_clean_for_rotate: Option<bool>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -196,9 +221,17 @@ enum Command {
         #[arg(long = "github-user")]
         github_user: Option<String>,
         #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
+        all_keys_for_user: bool,
+        #[arg(long)]
         force: bool,
         #[arg(long = "auto-reencrypt")]
         auto_reencrypt: bool,
+        #[arg(long)]
+        json: bool,
     },
     Install,
     MigrateFromGitCrypt {
@@ -240,6 +273,10 @@ enum Command {
         path: String,
     },
     FilterProcess,
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -313,9 +350,22 @@ fn main() -> Result<()> {
         Command::RevokeUser {
             fingerprint,
             github_user,
+            org,
+            team,
+            all_keys_for_user,
             force,
             auto_reencrypt,
-        } => cmd_revoke_user(fingerprint, github_user, force, auto_reencrypt),
+            json,
+        } => cmd_revoke_user(
+            fingerprint,
+            github_user,
+            org,
+            team,
+            all_keys_for_user,
+            force,
+            auto_reencrypt,
+            json,
+        ),
         Command::Install => cmd_install(),
         Command::MigrateFromGitCrypt {
             dry_run,
@@ -331,6 +381,7 @@ fn main() -> Result<()> {
         Command::Smudge { path } => cmd_smudge(&path),
         Command::Diff { path } => cmd_diff(&path),
         Command::FilterProcess => cmd_filter_process(),
+        Command::Policy { command } => cmd_policy(command),
         Command::Config { command } => cmd_config(command),
     }
 }
@@ -478,6 +529,45 @@ fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+fn parse_github_auth_mode(raw: &str) -> Result<GithubAuthMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(GithubAuthMode::Auto),
+        "gh" => Ok(GithubAuthMode::Gh),
+        "token" => Ok(GithubAuthMode::Token),
+        "anonymous" => Ok(GithubAuthMode::Anonymous),
+        other => anyhow::bail!(
+            "unsupported github auth mode '{other}'; expected auto|gh|token|anonymous"
+        ),
+    }
+}
+
+fn github_fetch_options(repo_root: &std::path::Path) -> Result<GithubFetchOptions> {
+    let cfg = read_local_config(repo_root)?;
+    let mut options = GithubFetchOptions::default();
+    if let Some(api_base) = cfg.github_api_base {
+        options.api_base_url = api_base.trim_end_matches('/').to_string();
+    }
+    if let Some(web_base) = cfg.github_web_base {
+        options.web_base_url = web_base.trim_end_matches('/').to_string();
+    }
+    if let Some(mode) = cfg.github_auth_mode {
+        options.auth_mode = parse_github_auth_mode(&mode)?;
+    }
+    if let Some(hard_fail) = cfg.github_private_source_hard_fail {
+        options.private_source_hard_fail = hard_fail;
+    }
+    Ok(options)
+}
+
+fn github_auth_mode_label(mode: GithubAuthMode) -> &'static str {
+    match mode {
+        GithubAuthMode::Auto => "auto",
+        GithubAuthMode::Gh => "gh",
+        GithubAuthMode::Token => "token",
+        GithubAuthMode::Anonymous => "anonymous",
+    }
 }
 
 fn repo_key_id_from_bytes(key: &[u8]) -> String {
@@ -728,6 +818,7 @@ fn cmd_init(
     strict: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
 
     let init = InitOptions {
         protected_patterns: if patterns.is_empty() {
@@ -766,7 +857,12 @@ fn cmd_init(
     }
 
     for url in github_keys_urls {
-        let recipients = add_recipients_from_github_source(&repo_root, &url, None)?;
+        let recipients = add_recipients_from_github_source_with_options(
+            &repo_root,
+            &url,
+            None,
+            &github_options,
+        )?;
         added_recipients.extend(recipients);
     }
 
@@ -983,6 +1079,8 @@ fn cmd_status(json: bool) -> Result<()> {
     let recipients = list_recipients(&repo_root)?;
     let wrapped_files = wrapped_key_files(&repo_root)?;
     let helper = resolve_agent_helper(&repo_root)?;
+    let protected_count = protected_tracked_files(&repo_root, &manifest)?.len();
+    let drift_count = verify_failures_with_manifest(&repo_root, &manifest)?.len();
 
     if json {
         let payload = serde_json::json!({
@@ -998,6 +1096,8 @@ fn cmd_status(json: bool) -> Result<()> {
             "identity": {"label": identity.label, "source": format!("{:?}", identity.source)},
             "recipients": recipients.len(),
             "wrapped_keys": wrapped_files.len(),
+            "protected_tracked_files": protected_count,
+            "drift_failures": drift_count,
             "unlock_source": session.as_ref().map(|s| s.key_source.clone()),
             "unlock_repo_key_id": session.as_ref().and_then(|s| s.repo_key_id.clone()),
             "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
@@ -1036,6 +1136,8 @@ fn cmd_status(json: bool) -> Result<()> {
     println!("identity: {} ({:?})", identity.label, identity.source);
     println!("recipients: {}", recipients.len());
     println!("wrapped keys: {}", wrapped_files.len());
+    println!("protected tracked files: {}", protected_count);
+    println!("drift failures: {}", drift_count);
     if let Some(session) = session {
         println!("unlock source: {}", session.key_source);
         println!(
@@ -1060,6 +1162,7 @@ fn cmd_add_user(
     github_user: Option<String>,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
     let session_key = repo_key_from_session()?;
     let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
@@ -1070,13 +1173,22 @@ fn cmd_add_user(
     let mut new_recipients = Vec::new();
 
     if let Some(url) = github_keys_url {
-        let added = add_recipients_from_github_keys(&repo_root, &url)?;
+        let added = add_recipients_from_github_source_with_options(
+            &repo_root,
+            &url,
+            None,
+            &github_options,
+        )?;
         new_recipients.extend(added);
         println!("added {} recipients from {}", new_recipients.len(), url);
     }
 
     if let Some(username) = github_user {
-        let added = add_recipients_from_github_username(&repo_root, &username)?;
+        let added = add_recipients_from_github_username_with_options(
+            &repo_root,
+            &username,
+            &github_options,
+        )?;
         println!(
             "added {} recipients from github user {}",
             added.len(),
@@ -1197,24 +1309,121 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
 fn cmd_revoke_user(
     fingerprint: Option<String>,
     github_user: Option<String>,
+    org: Option<String>,
+    team: Option<String>,
+    all_keys_for_user: bool,
     force: bool,
     auto_reencrypt: bool,
+    json: bool,
 ) -> Result<()> {
-    match (fingerprint.as_deref(), github_user.as_deref()) {
-        (Some(fingerprint), None) => cmd_remove_user(fingerprint, force)?,
-        (None, Some(username)) => cmd_remove_github_user(username, force)?,
-        (Some(_), Some(_)) => {
-            anyhow::bail!("revoke-user accepts either --fingerprint or --github-user, not both")
-        }
-        (None, None) => {
-            anyhow::bail!("revoke-user requires --fingerprint <id> or --github-user <username>")
-        }
+    let repo_root = current_repo_root()?;
+    let mut removed_fingerprints = Vec::new();
+
+    let selectors = usize::from(fingerprint.is_some())
+        + usize::from(github_user.is_some())
+        + usize::from(org.is_some() || team.is_some());
+    if selectors != 1 {
+        anyhow::bail!(
+            "revoke-user requires exactly one selector: --fingerprint, --github-user, or --org/--team"
+        );
     }
 
+    let target = if let Some(fingerprint) = fingerprint {
+        cmd_remove_user(&fingerprint, force)?;
+        removed_fingerprints.push(fingerprint.clone());
+        format!("fingerprint:{fingerprint}")
+    } else if let Some(username) = github_user {
+        let registry = read_github_sources(&repo_root)?;
+        if all_keys_for_user {
+            let user_fingerprints: Vec<String> = list_recipients(&repo_root)?
+                .into_iter()
+                .filter_map(|recipient| {
+                    if let RecipientSource::GithubKeys {
+                        username: Some(ref u),
+                        ..
+                    } = recipient.source
+                        && *u == username
+                    {
+                        return Some(recipient.fingerprint);
+                    }
+                    None
+                })
+                .collect();
+            if user_fingerprints.is_empty() {
+                anyhow::bail!("no recipient keys found for github user {username}");
+            }
+            let recipients_count = list_recipients(&repo_root)?.len();
+            let would_remove = user_fingerprints
+                .iter()
+                .filter(|fp| !fingerprint_in_other_sources(&registry, fp, Some(&username), None))
+                .count();
+            let manifest = read_manifest(&repo_root)?;
+            enforce_min_recipients(
+                &manifest,
+                recipients_count.saturating_sub(would_remove),
+                "revoke-user",
+            )?;
+
+            for fp in &user_fingerprints {
+                if !fingerprint_in_other_sources(&registry, fp, Some(&username), None) {
+                    let _ = remove_recipient_by_fingerprint(&repo_root, fp)?;
+                    removed_fingerprints.push(fp.clone());
+                }
+            }
+
+            let mut updated_registry = registry;
+            updated_registry
+                .users
+                .retain(|entry| entry.username != username);
+            write_github_sources(&repo_root, &updated_registry)?;
+        } else {
+            let source = registry
+                .users
+                .iter()
+                .find(|entry| entry.username == username)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("github user source not found: {username}"))?;
+            removed_fingerprints = source.fingerprints;
+            cmd_remove_github_user(&username, force)?;
+        }
+        format!("github-user:{username}")
+    } else {
+        let Some(org) = org else {
+            anyhow::bail!("--org is required with --team")
+        };
+        let Some(team) = team else {
+            anyhow::bail!("--team is required with --org")
+        };
+        let registry = read_github_sources(&repo_root)?;
+        let source = registry
+            .teams
+            .iter()
+            .find(|entry| entry.org == org && entry.team == team)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("github team source not found: {org}/{team}"))?;
+        removed_fingerprints = source.fingerprints;
+        cmd_remove_github_team(&org, &team)?;
+        format!("github-team:{org}/{team}")
+    };
+
+    let mut refreshed = 0usize;
     if auto_reencrypt {
-        let repo_root = current_repo_root()?;
         let manifest = read_manifest(&repo_root)?;
-        let refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
+        refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "target": target,
+                "removed_fingerprints": removed_fingerprints,
+                "auto_reencrypt": auto_reencrypt,
+                "reencrypted_files": refreshed,
+            }))?
+        );
+    } else if auto_reencrypt {
         println!(
             "revoke-user: auto-reencrypt refreshed {} protected files",
             refreshed
@@ -1228,6 +1437,7 @@ fn cmd_revoke_user(
 
 fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let session_key = repo_key_from_session()?;
@@ -1236,7 +1446,8 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
         .map(|recipient| recipient.fingerprint)
         .collect();
 
-    let recipients = add_recipients_from_github_username(&repo_root, username)?;
+    let recipients =
+        add_recipients_from_github_username_with_options(&repo_root, username, &github_options)?;
     enforce_allowed_key_types_for_added_recipients(
         &repo_root,
         &manifest,
@@ -1258,9 +1469,10 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
     registry.users.retain(|source| source.username != username);
     registry.users.push(GithubUserSource {
         username: username.to_string(),
-        url: format!("https://github.com/{username}.keys"),
+        url: format!("{}/{}.keys", github_options.web_base_url, username),
         fingerprints,
         last_refreshed_unix: now_unix(),
+        etag: None,
     });
     write_github_sources(&repo_root, &registry)?;
 
@@ -1336,10 +1548,13 @@ fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
 
 fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let session_key = repo_key_from_session()?;
-    let (members, _, _) = fetch_github_team_members(org, team)?;
+    let fetched_team = fetch_github_team_members_with_options(org, team, &github_options, None)?;
+    let team_etag = fetched_team.metadata.etag.clone();
+    let members = fetched_team.members;
 
     let mut fingerprints = std::collections::BTreeSet::new();
     for member in &members {
@@ -1347,7 +1562,8 @@ fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
             .into_iter()
             .map(|recipient| recipient.fingerprint)
             .collect();
-        let recipients = add_recipients_from_github_username(&repo_root, member)?;
+        let recipients =
+            add_recipients_from_github_username_with_options(&repo_root, member, &github_options)?;
         enforce_allowed_key_types_for_added_recipients(
             &repo_root,
             &manifest,
@@ -1374,6 +1590,7 @@ fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
         member_usernames: members,
         fingerprints: fingerprints.into_iter().collect(),
         last_refreshed_unix: now_unix(),
+        etag: team_etag,
     });
     write_github_sources(&repo_root, &registry)?;
     println!("add-github-team: added source for {org}/{team}");
@@ -1448,6 +1665,7 @@ fn cmd_refresh_github_keys(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets: Vec<_> = registry.users.clone();
@@ -1471,7 +1689,29 @@ fn cmd_refresh_github_keys(
             .collect();
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
-        let fetched_user = fetch_github_user_keys(&source.username)?;
+        let fetched_user = fetch_github_user_keys_with_options(
+            &source.username,
+            &github_options,
+            source.etag.as_deref(),
+        )?;
+
+        if fetched_user.metadata.not_modified {
+            events.push(serde_json::json!({
+                "username": source.username,
+                "added": Vec::<String>::new(),
+                "removed": Vec::<String>::new(),
+                "unchanged": before_set.len(),
+                "dry_run": dry_run,
+                "backend": format!("{:?}", fetched_user.backend),
+                "authenticated": fetched_user.authenticated,
+                "auth_mode": github_auth_mode_label(fetched_user.auth_mode),
+                "not_modified": true,
+                "rate_limit_remaining": fetched_user.metadata.rate_limit_remaining,
+                "rate_limit_reset_unix": fetched_user.metadata.rate_limit_reset_unix,
+            }));
+            continue;
+        }
+
         let fetched = fetched_user
             .keys
             .iter()
@@ -1540,6 +1780,7 @@ fn cmd_refresh_github_keys(
             {
                 entry.fingerprints = after_set.iter().cloned().collect();
                 entry.last_refreshed_unix = now_unix();
+                entry.etag = fetched_user.metadata.etag.clone();
             }
         }
 
@@ -1551,6 +1792,10 @@ fn cmd_refresh_github_keys(
             "dry_run": dry_run,
             "backend": format!("{:?}", fetched_user.backend),
             "authenticated": fetched_user.authenticated,
+            "auth_mode": github_auth_mode_label(fetched_user.auth_mode),
+            "not_modified": false,
+            "rate_limit_remaining": fetched_user.metadata.rate_limit_remaining,
+            "rate_limit_reset_unix": fetched_user.metadata.rate_limit_reset_unix,
         }));
     }
 
@@ -1587,6 +1832,7 @@ fn cmd_refresh_github_teams(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets = registry.teams.clone();
@@ -1606,9 +1852,38 @@ fn cmd_refresh_github_teams(
     let mut drift_detected = false;
 
     for source in targets {
-        let (members, backend, authenticated) =
-            fetch_github_team_members(&source.org, &source.team)?;
+        let fetched_team = fetch_github_team_members_with_options(
+            &source.org,
+            &source.team,
+            &github_options,
+            source.etag.as_deref(),
+        )?;
+        let fetched_team_metadata = fetched_team.metadata.clone();
+        let fetched_team_auth_mode = fetched_team.auth_mode;
+        let members = fetched_team.members;
+        let backend = fetched_team.backend;
+        let authenticated = fetched_team.authenticated;
         let mut fetched_fingerprints = std::collections::HashSet::new();
+
+        let before_set: std::collections::HashSet<String> =
+            source.fingerprints.iter().cloned().collect();
+        if fetched_team_metadata.not_modified {
+            events.push(serde_json::json!({
+                "org": source.org,
+                "team": source.team,
+                "added": Vec::<String>::new(),
+                "removed": Vec::<String>::new(),
+                "unchanged": before_set.len(),
+                "dry_run": dry_run,
+                "backend": format!("{:?}", backend),
+                "authenticated": authenticated,
+                "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
+                "not_modified": true,
+                "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
+                "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
+            }));
+            continue;
+        }
 
         for member in &members {
             let existing_fingerprints: std::collections::HashSet<String> =
@@ -1616,7 +1891,11 @@ fn cmd_refresh_github_teams(
                     .into_iter()
                     .map(|recipient| recipient.fingerprint)
                     .collect();
-            let imported = add_recipients_from_github_username(&repo_root, member)?;
+            let imported = add_recipients_from_github_username_with_options(
+                &repo_root,
+                member,
+                &github_options,
+            )?;
             enforce_allowed_key_types_for_added_recipients(
                 &repo_root,
                 &manifest,
@@ -1636,8 +1915,6 @@ fn cmd_refresh_github_teams(
             }
         }
 
-        let before_set: std::collections::HashSet<String> =
-            source.fingerprints.iter().cloned().collect();
         let added: Vec<String> = fetched_fingerprints
             .difference(&before_set)
             .cloned()
@@ -1679,6 +1956,7 @@ fn cmd_refresh_github_teams(
                 entry.member_usernames = members;
                 entry.fingerprints = fetched_fingerprints.iter().cloned().collect();
                 entry.last_refreshed_unix = now_unix();
+                entry.etag = fetched_team_metadata.etag.clone();
             }
         }
 
@@ -1691,6 +1969,10 @@ fn cmd_refresh_github_teams(
             "dry_run": dry_run,
             "backend": format!("{:?}", backend),
             "authenticated": authenticated,
+            "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
+            "not_modified": false,
+            "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
+            "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
         }));
     }
 
@@ -1785,9 +2067,127 @@ fn cmd_config(command: ConfigCommand) -> Result<()> {
             println!("config: set agent helper to {}", helper.display());
             Ok(())
         }
+        ConfigCommand::SetGithubApiBase { url } => {
+            let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            cfg.github_api_base = Some(url.trim_end_matches('/').to_string());
+            write_local_config(&repo_root, &cfg)?;
+            println!(
+                "config: set github api base to {}",
+                cfg.github_api_base.as_deref().unwrap_or_default()
+            );
+            Ok(())
+        }
+        ConfigCommand::SetGithubWebBase { url } => {
+            let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            cfg.github_web_base = Some(url.trim_end_matches('/').to_string());
+            write_local_config(&repo_root, &cfg)?;
+            println!(
+                "config: set github web base to {}",
+                cfg.github_web_base.as_deref().unwrap_or_default()
+            );
+            Ok(())
+        }
+        ConfigCommand::SetGithubAuthMode { mode } => {
+            let normalized = mode.trim().to_ascii_lowercase();
+            let _ = parse_github_auth_mode(&normalized)?;
+            let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            cfg.github_auth_mode = Some(normalized.clone());
+            write_local_config(&repo_root, &cfg)?;
+            println!("config: set github auth mode to {normalized}");
+            Ok(())
+        }
+        ConfigCommand::SetGithubPrivateSourceHardFail { enabled } => {
+            let enabled = match enabled.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                other => anyhow::bail!(
+                    "invalid boolean value '{other}' for set-github-private-source-hard-fail"
+                ),
+            };
+            let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            cfg.github_private_source_hard_fail = Some(enabled);
+            write_local_config(&repo_root, &cfg)?;
+            println!("config: set github private-source hard-fail to {enabled}");
+            Ok(())
+        }
         ConfigCommand::Show => {
             let cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_policy(command: PolicyCommand) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    match command {
+        PolicyCommand::Show { json } => {
+            let manifest = read_manifest(&repo_root)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else {
+                println!("policy: min_recipients {}", manifest.min_recipients);
+                println!(
+                    "policy: allowed_key_types {}",
+                    manifest.allowed_key_types.join(", ")
+                );
+                println!(
+                    "policy: require_doctor_clean_for_rotate {}",
+                    manifest.require_doctor_clean_for_rotate
+                );
+            }
+            Ok(())
+        }
+        PolicyCommand::Verify { json } => {
+            let manifest = read_manifest(&repo_root)?;
+            let common_dir = current_common_dir()?;
+            let failures = collect_doctor_failures(&repo_root, &common_dir, &manifest)?;
+            let ok = failures.is_empty();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": ok,
+                        "failures": failures,
+                    }))?
+                );
+            } else if ok {
+                println!("policy verify: OK");
+            } else {
+                println!("policy verify: FAIL ({})", failures.len());
+                for failure in &failures {
+                    eprintln!("- {failure}");
+                }
+            }
+            if ok {
+                Ok(())
+            } else {
+                anyhow::bail!("policy verification failed")
+            }
+        }
+        PolicyCommand::Set {
+            min_recipients,
+            allow_key_types,
+            require_doctor_clean_for_rotate,
+        } => {
+            let mut manifest = read_manifest(&repo_root)?;
+            if let Some(min) = min_recipients {
+                manifest.min_recipients = min;
+            }
+            if !allow_key_types.is_empty() {
+                manifest.allowed_key_types = allow_key_types;
+            }
+            if let Some(required) = require_doctor_clean_for_rotate {
+                manifest.require_doctor_clean_for_rotate = required;
+            }
+            if manifest.min_recipients == 0 {
+                anyhow::bail!("policy set rejected: min_recipients must be at least 1");
+            }
+            if manifest.allowed_key_types.is_empty() {
+                anyhow::bail!("policy set rejected: allowed_key_types cannot be empty");
+            }
+            write_manifest(&repo_root, &manifest)?;
+            println!("policy set: updated manifest policy");
             Ok(())
         }
     }

@@ -833,6 +833,116 @@ fn migrate_write_report_outputs_json_file() {
 }
 
 #[test]
+fn policy_set_show_verify_json_roundtrip() {
+    let bin = env!("CARGO_BIN_EXE_git-ssh-crypt");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "policy",
+        "set",
+        "--min-recipients",
+        "1",
+        "--allow-key-type",
+        "ssh-ed25519",
+        "--require-doctor-clean-for-rotate",
+        "true",
+    ]));
+
+    let policy_show = String::from_utf8(run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["policy", "show", "--json"]),
+    ))
+    .expect("policy show output should be utf8");
+    let policy_json: serde_json::Value =
+        serde_json::from_str(&policy_show).expect("policy show should parse");
+    assert_eq!(policy_json["min_recipients"], 1);
+    assert_eq!(policy_json["require_doctor_clean_for_rotate"], true);
+
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["policy", "verify", "--json"]),
+    );
+}
+
+#[test]
+fn config_show_includes_github_runtime_settings() {
+    let bin = env!("CARGO_BIN_EXE_git-ssh-crypt");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "config",
+        "set-github-api-base",
+        "https://ghe.example.com/api/v3",
+    ]));
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "config",
+        "set-github-web-base",
+        "https://ghe.example.com",
+    ]));
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["config", "set-github-auth-mode", "token"]),
+    );
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "config",
+        "set-github-private-source-hard-fail",
+        "false",
+    ]));
+
+    let out = String::from_utf8(run_ok(
+        Command::new(bin).current_dir(repo).args(["config", "show"]),
+    ))
+    .expect("config show output should be utf8");
+    let cfg: serde_json::Value = serde_json::from_str(&out).expect("config should parse");
+    assert_eq!(cfg["github_api_base"], "https://ghe.example.com/api/v3");
+    assert_eq!(cfg["github_web_base"], "https://ghe.example.com");
+    assert_eq!(cfg["github_auth_mode"], "token");
+    assert_eq!(cfg["github_private_source_hard_fail"], false);
+}
+
+#[test]
 fn lock_refuses_dirty_protected_files_without_force() {
     let bin = env!("CARGO_BIN_EXE_git-ssh-crypt");
     let temp = TempDir::new().expect("temp dir should create");
