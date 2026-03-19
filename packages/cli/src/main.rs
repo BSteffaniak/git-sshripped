@@ -480,7 +480,10 @@ fn cmd_filter_process() -> Result<()> {
         let result = run_filter_command(&repo_root, &common_dir, &command, &pathname, &input);
         match result {
             Ok(output) => write_filter_success(&mut writer, &output)?,
-            Err(_) => write_status_only(&mut writer, "error")?,
+            Err(err) => {
+                eprintln!("Error: {err:#}");
+                write_status_only(&mut writer, "error")?
+            }
         }
     }
 
@@ -512,15 +515,31 @@ fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
         if p.is_absolute() {
             return Ok(p);
         }
+        if let Some(git_dir) = std::env::var_os("GIT_DIR") {
+            let git_dir = PathBuf::from(git_dir);
+            let git_dir_abs = if git_dir.is_absolute() {
+                git_dir
+            } else {
+                cwd.join(git_dir)
+            };
+            let base = git_dir_abs
+                .parent()
+                .map_or_else(|| cwd.to_path_buf(), std::path::Path::to_path_buf);
+            return Ok(base.join(p));
+        }
         return Ok(cwd.join(p));
     }
 
     if let Some(git_dir) = std::env::var_os("GIT_DIR") {
         let p = PathBuf::from(git_dir);
-        if p.is_absolute() {
-            return Ok(p);
+        let git_dir_abs = if p.is_absolute() { p } else { cwd.join(p) };
+        if let Some(parent) = git_dir_abs.parent()
+            && parent.file_name().is_some_and(|name| name == "worktrees")
+            && let Some(common) = parent.parent()
+        {
+            return Ok(common.to_path_buf());
         }
-        return Ok(cwd.join(p));
+        return Ok(git_dir_abs);
     }
 
     Ok(cwd.join(".git"))
