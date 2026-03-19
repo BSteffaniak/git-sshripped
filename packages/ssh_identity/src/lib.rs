@@ -402,7 +402,7 @@ pub fn unwrap_repo_key_from_wrapped_files(
             .with_context(|| format!("failed reading wrapped key {}", wrapped.display()))?;
 
         for (identity, path) in &identities {
-            let decryptor = Decryptor::new(&wrapped_bytes[..])
+            let decryptor = Decryptor::new_buffered(std::io::Cursor::new(&wrapped_bytes))
                 .with_context(|| format!("invalid wrapped key format {}", wrapped.display()))?;
             let decrypt_identity = identity.clone().with_callbacks(TerminalCallbacks);
             let mut reader =

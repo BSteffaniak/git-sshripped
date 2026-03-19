@@ -1017,6 +1017,15 @@ fn cmd_unlock(
     let common_dir = current_common_dir()?;
     let mut manifest = read_manifest(&repo_root)?;
 
+    // If there is already a valid unlock session, skip the expensive key-unwrap path.
+    if key_hex.is_none() {
+        if let Ok(Some(_)) = repo_key_from_session_in(&common_dir, Some(&manifest)) {
+            install_git_filters(&repo_root, &current_bin_path())?;
+            println!("repository is already unlocked");
+            return Ok(());
+        }
+    }
+
     let (key, key_source) = if let Some(hex_value) = key_hex {
         (
             hex::decode(hex_value.trim()).context("--key-hex must be valid hex")?,
