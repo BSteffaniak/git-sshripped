@@ -31,9 +31,9 @@ use git_ssh_crypt_repository_models::{
     RepositoryManifest,
 };
 use git_ssh_crypt_ssh_identity::{
-    default_private_key_candidates, default_public_key_candidates, detect_identity,
-    private_keys_matching_agent, unwrap_repo_key_from_wrapped_files,
-    unwrap_repo_key_with_agent_helper,
+    default_private_key_candidates, detect_identity, private_keys_matching_agent,
+    unwrap_repo_key_from_wrapped_files, unwrap_repo_key_with_agent_helper,
+    well_known_public_key_paths,
 };
 use git_ssh_crypt_worktree::{
     clear_unlock_session, git_common_dir, git_toplevel, read_unlock_session, write_unlock_session,
@@ -952,7 +952,7 @@ fn cmd_init(
         added_recipients.extend(recipients);
     }
 
-    for path in default_public_key_candidates() {
+    for path in well_known_public_key_paths() {
         if !path.exists() {
             continue;
         }

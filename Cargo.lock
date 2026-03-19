@@ -871,6 +871,7 @@ dependencies = [
  "git_ssh_crypt_ssh_identity_models",
  "hex",
  "rpassword",
+ "tempfile",
  "wait-timeout",
 ]
 

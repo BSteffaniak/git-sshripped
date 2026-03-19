@@ -21,3 +21,6 @@ wait-timeout = { workspace = true }
 [features]
 default = []
 fail-on-warnings = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
