@@ -10,11 +10,12 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use git_ssh_crypt_cli_models::InitOptions;
-use git_ssh_crypt_encryption_models::EncryptionAlgorithm;
+use git_ssh_crypt_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
 use git_ssh_crypt_filter::{clean, diff, smudge};
 use git_ssh_crypt_recipient::{
     add_recipient_from_public_key, add_recipients_from_github_keys, list_recipients,
-    wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
+    remove_recipient_by_fingerprint, wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient,
+    wrapped_store_dir,
 };
 use git_ssh_crypt_recipient_models::RecipientSource;
 use git_ssh_crypt_repository::{
@@ -62,6 +63,8 @@ enum Command {
         recipient_keys: Vec<String>,
         #[arg(long = "github-keys-url")]
         github_keys_urls: Vec<String>,
+        #[arg(long)]
+        strict: bool,
     },
     Unlock {
         #[arg(long)]
@@ -78,6 +81,17 @@ enum Command {
         key: Option<String>,
         #[arg(long)]
         github_keys_url: Option<String>,
+    },
+    ListUsers,
+    RemoveUser {
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        force: bool,
+    },
+    Verify {
+        #[arg(long)]
+        strict: bool,
     },
     Clean {
         #[arg(long)]
@@ -103,7 +117,14 @@ fn main() -> Result<()> {
             algorithm,
             recipient_keys,
             github_keys_urls,
-        } => cmd_init(patterns, algorithm, recipient_keys, github_keys_urls),
+            strict,
+        } => cmd_init(
+            patterns,
+            algorithm,
+            recipient_keys,
+            github_keys_urls,
+            strict,
+        ),
         Command::Unlock {
             key_hex,
             identities,
@@ -116,6 +137,9 @@ fn main() -> Result<()> {
             key,
             github_keys_url,
         } => cmd_add_user(key, github_keys_url),
+        Command::ListUsers => cmd_list_users(),
+        Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
+        Command::Verify { strict } => cmd_verify(strict),
         Command::Clean { path } => cmd_clean(&path),
         Command::Smudge { path } => cmd_smudge(&path),
         Command::Diff { path } => cmd_diff(&path),
@@ -161,6 +185,7 @@ fn cmd_init(
     algorithm: CliAlgorithm,
     recipient_keys: Vec<String>,
     github_keys_urls: Vec<String>,
+    strict: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
 
@@ -171,12 +196,14 @@ fn cmd_init(
             patterns
         },
         algorithm: algorithm.into(),
+        strict_mode: strict,
     };
 
     let manifest = RepositoryManifest {
         manifest_version: 1,
         encryption_algorithm: init.algorithm,
         protected_patterns: init.protected_patterns,
+        strict_mode: init.strict_mode,
     };
 
     write_manifest(&repo_root, &manifest)?;
@@ -226,6 +253,7 @@ fn cmd_init(
 
     println!("initialized git-ssh-crypt in {}", repo_root.display());
     println!("algorithm: {:?}", manifest.encryption_algorithm);
+    println!("strict_mode: {}", manifest.strict_mode);
     println!("patterns: {}", manifest.protected_patterns.join(", "));
     println!("recipients: {}", recipients.len());
     println!("wrapped keys written: {}", wrapped.len());
@@ -302,6 +330,7 @@ fn cmd_status() -> Result<()> {
     );
     println!("scope: all worktrees via {}", common_dir.display());
     println!("algorithm: {:?}", manifest.encryption_algorithm);
+    println!("strict_mode: {}", manifest.strict_mode);
     println!("identity: {} ({:?})", identity.label, identity.source);
     println!("recipients: {}", recipients.len());
     println!("wrapped keys: {}", wrapped_files.len());
@@ -359,6 +388,128 @@ fn cmd_add_user(key: Option<String>, github_keys_url: Option<String>) -> Result<
         println!(
             "warning: repository is locked; run `git-ssh-crypt unlock` then `git-ssh-crypt rewrap` to grant access"
         );
+    }
+
+    Ok(())
+}
+
+fn cmd_list_users() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let recipients = list_recipients(&repo_root)?;
+    if recipients.is_empty() {
+        println!("no recipients configured");
+        return Ok(());
+    }
+
+    for recipient in recipients {
+        println!(
+            "{} {} {:?}",
+            recipient.fingerprint, recipient.key_type, recipient.source
+        );
+    }
+    Ok(())
+}
+
+fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let recipients = list_recipients(&repo_root)?;
+
+    let exists = recipients
+        .iter()
+        .any(|recipient| recipient.fingerprint == fingerprint);
+    if !exists {
+        anyhow::bail!("recipient not found: {fingerprint}");
+    }
+
+    if recipients.len() <= 1 && !force {
+        anyhow::bail!(
+            "refusing to remove the last recipient; pass --force to override (risking lockout)"
+        );
+    }
+
+    let removed = remove_recipient_by_fingerprint(&repo_root, fingerprint)?;
+    if !removed {
+        anyhow::bail!("no files were removed for recipient {fingerprint}");
+    }
+
+    println!("removed recipient {fingerprint}");
+    Ok(())
+}
+
+fn git_ls_files(repo_root: &std::path::Path) -> Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["ls-files", "-z"])
+        .output()
+        .context("failed to run git ls-files")?;
+    if !output.status.success() {
+        anyhow::bail!("git ls-files failed");
+    }
+
+    let mut paths = Vec::new();
+    for raw in output.stdout.split(|b| *b == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8(raw.to_vec()).context("non-utf8 path from git ls-files")?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn git_show_index_path(repo_root: &std::path::Path, path: &str) -> Result<Vec<u8>> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["show", &format!(":{path}")])
+        .output()
+        .with_context(|| format!("failed to run git show :{path}"))?;
+
+    if !output.status.success() {
+        anyhow::bail!("git show :{path} failed");
+    }
+
+    Ok(output.stdout)
+}
+
+fn cmd_verify(strict: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
+    let strict = strict || manifest.strict_mode;
+
+    let files = git_ls_files(&repo_root)?;
+    let mut failures = Vec::new();
+
+    for path in files {
+        let protected =
+            git_ssh_crypt_filter::clean(&manifest, None, &path, b"verify-probe").is_err();
+        if !protected {
+            continue;
+        }
+
+        let blob = git_show_index_path(&repo_root, &path)?;
+        if !blob.starts_with(&ENCRYPTED_MAGIC) {
+            failures.push(path);
+        }
+    }
+
+    if failures.is_empty() {
+        println!("verify: OK");
+    } else {
+        println!("verify: FAIL ({})", failures.len());
+        for file in &failures {
+            eprintln!("- plaintext protected file in index: {file}");
+        }
+        anyhow::bail!("verify failed");
+    }
+
+    if strict {
+        let process_cfg = git_local_config(&repo_root, "filter.git-ssh-crypt.process")?;
+        let required_cfg = git_local_config(&repo_root, "filter.git-ssh-crypt.required")?;
+        if process_cfg.is_none() || required_cfg.as_deref() != Some("true") {
+            anyhow::bail!(
+                "strict verify failed: filter.git-ssh-crypt.process and required=true must be configured"
+            );
+        }
     }
 
     Ok(())
@@ -468,6 +619,14 @@ fn cmd_doctor() -> Result<()> {
         failures.push("no recipients configured".to_string());
     } else {
         println!("check recipients: PASS ({})", recipients.len());
+        for recipient in &recipients {
+            if recipient.key_type != "ssh-ed25519" && recipient.key_type != "ssh-rsa" {
+                failures.push(format!(
+                    "recipient {} uses unsupported key type {}",
+                    recipient.fingerprint, recipient.key_type
+                ));
+            }
+        }
     }
 
     let wrapped_files = wrapped_key_files(&repo_root)?;
@@ -507,6 +666,7 @@ fn cmd_doctor() -> Result<()> {
     }
 
     println!("doctor: algorithm {:?}", manifest.encryption_algorithm);
+    println!("doctor: strict_mode {}", manifest.strict_mode);
     println!(
         "doctor: protected patterns {}",
         manifest.protected_patterns.join(", ")

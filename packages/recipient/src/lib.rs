@@ -15,6 +15,8 @@ use base64::Engine;
 use git_ssh_crypt_recipient_models::{RecipientKey, RecipientSource};
 use sha2::{Digest, Sha256};
 
+const SUPPORTED_KEY_TYPES: [&str; 2] = ["ssh-ed25519", "ssh-rsa"];
+
 #[must_use]
 pub fn recipient_store_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git-ssh-crypt").join("recipients")
@@ -73,6 +75,16 @@ pub fn add_recipient_from_public_key(
     let key_body = parts
         .next()
         .context("SSH public key is missing key material")?;
+
+    if !SUPPORTED_KEY_TYPES
+        .iter()
+        .any(|supported| *supported == key_type)
+    {
+        bail!(
+            "unsupported SSH key type '{key_type}'; supported types: {}",
+            SUPPORTED_KEY_TYPES.join(", ")
+        );
+    }
 
     let mut hasher = Sha256::new();
     hasher.update(key_type.as_bytes());
@@ -166,4 +178,27 @@ pub fn wrap_repo_key_for_all_recipients(repo_root: &Path, repo_key: &[u8]) -> Re
         wrapped_files.push(wrapped_file);
     }
     Ok(wrapped_files)
+}
+
+pub fn remove_recipient_by_fingerprint(repo_root: &Path, fingerprint: &str) -> Result<bool> {
+    let recipient_file = recipient_store_dir(repo_root).join(format!("{fingerprint}.toml"));
+    let wrapped_file = wrapped_store_dir(repo_root).join(format!("{fingerprint}.age"));
+
+    let mut removed_any = false;
+    if recipient_file.exists() {
+        fs::remove_file(&recipient_file).with_context(|| {
+            format!(
+                "failed to remove recipient file {}",
+                recipient_file.display()
+            )
+        })?;
+        removed_any = true;
+    }
+    if wrapped_file.exists() {
+        fs::remove_file(&wrapped_file)
+            .with_context(|| format!("failed to remove wrapped file {}", wrapped_file.display()))?;
+        removed_any = true;
+    }
+
+    Ok(removed_any)
 }

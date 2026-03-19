@@ -9,6 +9,7 @@ pub struct RepositoryManifest {
     pub manifest_version: u32,
     pub encryption_algorithm: EncryptionAlgorithm,
     pub protected_patterns: Vec<String>,
+    pub strict_mode: bool,
 }
 
 impl Default for RepositoryManifest {
@@ -17,6 +18,7 @@ impl Default for RepositoryManifest {
             manifest_version: 1,
             encryption_algorithm: EncryptionAlgorithm::AesSivV1,
             protected_patterns: vec!["secrets/**".to_string()],
+            strict_mode: false,
         }
     }
 }

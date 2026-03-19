@@ -8,6 +8,7 @@ use git_ssh_crypt_encryption_models::EncryptionAlgorithm;
 pub struct InitOptions {
     pub protected_patterns: Vec<String>,
     pub algorithm: EncryptionAlgorithm,
+    pub strict_mode: bool,
 }
 
 impl Default for InitOptions {
@@ -15,6 +16,7 @@ impl Default for InitOptions {
         Self {
             protected_patterns: vec!["secrets/**".to_string()],
             algorithm: EncryptionAlgorithm::AesSivV1,
+            strict_mode: false,
         }
     }
 }
