@@ -26,6 +26,7 @@
               cargo
               rustfmt
               clippy
+              cargo-deny
               pkg-config
               openssl
               fish
@@ -41,6 +42,7 @@
             echo "  - cargo ($(cargo --version))"
             echo "  - rustc ($(rustc --version))"
             echo "  - clippy ($(cargo clippy --version))"
+            echo "  - cargo-deny ($(cargo deny --version))"
 
             # Only exec fish if we're in an interactive shell (not running a command)
             if [ -z "$IN_NIX_SHELL_FISH" ] && [ -z "$BASH_EXECUTION_STRING" ]; then
