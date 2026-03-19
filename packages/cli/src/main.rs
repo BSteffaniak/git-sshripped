@@ -1024,6 +1024,8 @@ fn cmd_unlock(
         )
     } else {
         let explicit_identities: Vec<PathBuf> = identities.into_iter().map(PathBuf::from).collect();
+        let interactive_set: std::collections::HashSet<PathBuf> =
+            explicit_identities.iter().cloned().collect();
         let mut identity_files = Vec::new();
 
         if !no_agent {
@@ -1088,8 +1090,11 @@ fn cmd_unlock(
                 format!("agent-helper[{source}]: {}", descriptor.label),
             )
         } else {
-            let Some((unwrapped, descriptor)) =
-                unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files)?
+            let Some((unwrapped, descriptor)) = unwrap_repo_key_from_wrapped_files(
+                &wrapped_files,
+                &identity_files,
+                &interactive_set,
+            )?
             else {
                 anyhow::bail!(
                     "could not decrypt any wrapped key with agent helper or provided identity files; set GSC_SSH_AGENT_HELPER for true ssh-agent decrypt, or pass --identity"
@@ -2292,7 +2297,12 @@ fn cmd_access_audit(identities: Vec<String>, json: bool) -> Result<()> {
     let mut rows = Vec::new();
     for recipient in recipients {
         let wrapped = wrapped_store_dir(&repo_root).join(format!("{}.age", recipient.fingerprint));
-        let can = unwrap_repo_key_from_wrapped_files(&[wrapped], &identities)?.is_some();
+        let can = unwrap_repo_key_from_wrapped_files(
+            &[wrapped],
+            &identities,
+            &std::collections::HashSet::new(),
+        )?
+        .is_some();
         if can {
             accessible += 1;
         }

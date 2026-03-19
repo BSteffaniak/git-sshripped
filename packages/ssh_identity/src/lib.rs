@@ -2,6 +2,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -371,6 +372,7 @@ pub fn detect_identity() -> Result<IdentityDescriptor> {
 pub fn unwrap_repo_key_from_wrapped_files(
     wrapped_files: &[PathBuf],
     identity_files: &[PathBuf],
+    interactive_identities: &HashSet<PathBuf>,
 ) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
     let mut identities: Vec<(SshIdentity, PathBuf)> = Vec::new();
 
@@ -383,6 +385,15 @@ pub fn unwrap_repo_key_from_wrapped_files(
         let filename = Some(identity_file.display().to_string());
         let identity = SshIdentity::from_buffer(std::io::Cursor::new(&content), filename)
             .with_context(|| format!("failed parsing identity file {}", identity_file.display()))?;
+        if matches!(&identity, SshIdentity::Encrypted(_))
+            && !interactive_identities.contains(identity_file)
+        {
+            eprintln!(
+                "skipping passphrase-protected key {} (pass --identity to use it)",
+                identity_file.display()
+            );
+            continue;
+        }
         identities.push((identity, identity_file.clone()));
     }
 
