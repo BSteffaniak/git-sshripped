@@ -279,6 +279,8 @@ enum Command {
     Diff {
         #[arg(long)]
         path: String,
+        /// Temp file provided by git's textconv; if absent, read stdin
+        file: Option<String>,
     },
     FilterProcess,
     Policy {
@@ -389,7 +391,7 @@ fn main() -> Result<()> {
         Command::Verify { strict, json } => cmd_verify(strict, json),
         Command::Clean { path } => cmd_clean(&path),
         Command::Smudge { path } => cmd_smudge(&path),
-        Command::Diff { path } => cmd_diff(&path),
+        Command::Diff { path, file } => cmd_diff(&path, file.as_deref()),
         Command::FilterProcess => cmd_filter_process(),
         Command::Policy { command } => cmd_policy(command),
         Command::Config { command } => cmd_config(command),
@@ -1091,10 +1093,36 @@ fn cmd_unlock(
     }
 
     write_unlock_session(&common_dir, &key, &key_source, Some(key_id))?;
+    install_git_filters(&repo_root)?;
+
+    let mut decrypted_count = 0usize;
+    if let Ok(protected) = protected_tracked_files(&repo_root) {
+        for path in &protected {
+            let full = repo_root.join(path);
+            if let Ok(content) = fs::read(&full) {
+                if content.starts_with(&ENCRYPTED_MAGIC) {
+                    match git_ssh_crypt_encryption::decrypt(&key, path, &content) {
+                        Ok(plaintext) => {
+                            if fs::write(&full, &plaintext).is_ok() {
+                                decrypted_count += 1;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("warning: failed to decrypt {path}: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     println!(
         "unlocked repository across worktrees via {}",
         common_dir.display()
     );
+    if decrypted_count > 0 {
+        println!("decrypted {decrypted_count} protected files in working tree");
+    }
     Ok(())
 }
 
@@ -2867,6 +2895,9 @@ fn read_gitattributes_patterns(repo_root: &std::path::Path) -> Vec<String> {
     let mut patterns = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
         if trimmed.contains("filter=git-ssh-crypt") {
             if let Some(pattern) = trimmed.split_whitespace().next() {
                 patterns.push(pattern.to_string());
@@ -3479,9 +3510,14 @@ fn cmd_smudge(path: &str) -> Result<()> {
     write_stdout_all(&output)
 }
 
-fn cmd_diff(path: &str) -> Result<()> {
+fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
     let key = repo_key_from_session()?;
-    let input = read_stdin_all()?;
+    let input = if let Some(file_path) = file {
+        fs::read(file_path)
+            .with_context(|| format!("failed to read diff input file {file_path}"))?
+    } else {
+        read_stdin_all()?
+    };
     let output = diff(key.as_deref(), path, &input)?;
     write_stdout_all(&output)
 }
