@@ -3,7 +3,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -425,7 +425,227 @@ fn cmd_diff(path: &str) -> Result<()> {
 }
 
 fn cmd_filter_process() -> Result<()> {
-    anyhow::bail!(
-        "filter-process protocol is not yet implemented; use clean/smudge commands in filter config for now"
-    )
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut writer = BufWriter::new(stdout.lock());
+
+    handle_filter_handshake(&mut reader, &mut writer)?;
+
+    loop {
+        let Some(headers) = read_pkt_kv_list(&mut reader)? else {
+            break;
+        };
+
+        let command = headers
+            .iter()
+            .find_map(|(k, v)| (k == "command").then_some(v.clone()));
+
+        let Some(command) = command else {
+            write_status_only(&mut writer, "error")?;
+            continue;
+        };
+
+        if command == "list_available_blobs" {
+            write_empty_success_list_available_blobs(&mut writer)?;
+            continue;
+        }
+
+        let pathname = headers
+            .iter()
+            .find_map(|(k, v)| (k == "pathname").then_some(v.clone()))
+            .unwrap_or_default();
+
+        let input = read_pkt_content(&mut reader)?;
+
+        let result = run_filter_command(&command, &pathname, &input);
+        match result {
+            Ok(output) => write_filter_success(&mut writer, &output)?,
+            Err(_) => write_status_only(&mut writer, "error")?,
+        }
+    }
+
+    writer
+        .flush()
+        .context("failed to flush filter-process writer")?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum PktRead {
+    Data(Vec<u8>),
+    Flush,
+    Eof,
+}
+
+fn read_pkt_line(reader: &mut impl Read) -> Result<PktRead> {
+    let mut len_buf = [0_u8; 4];
+    match reader.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(PktRead::Eof),
+        Err(err) => return Err(err).context("failed reading pkt-line length"),
+    }
+
+    let len_str = std::str::from_utf8(&len_buf).context("pkt-line header is not utf8 hex")?;
+    let len = usize::from_str_radix(len_str, 16).context("invalid pkt-line length")?;
+
+    if len == 0 {
+        return Ok(PktRead::Flush);
+    }
+    if len < 4 {
+        anyhow::bail!("invalid pkt-line length < 4");
+    }
+
+    let data_len = len - 4;
+    let mut data = vec![0_u8; data_len];
+    reader
+        .read_exact(&mut data)
+        .context("failed reading pkt-line payload")?;
+    Ok(PktRead::Data(data))
+}
+
+fn write_pkt_line(writer: &mut impl Write, data: &[u8]) -> Result<()> {
+    if data.len() > 65516 {
+        anyhow::bail!("pkt-line payload too large");
+    }
+    let total = data.len() + 4;
+    writer
+        .write_all(format!("{total:04x}").as_bytes())
+        .context("failed writing pkt-line length")?;
+    writer
+        .write_all(data)
+        .context("failed writing pkt-line payload")?;
+    Ok(())
+}
+
+fn write_pkt_flush(writer: &mut impl Write) -> Result<()> {
+    writer
+        .write_all(b"0000")
+        .context("failed writing pkt-line flush")?;
+    Ok(())
+}
+
+fn read_pkt_kv_list(reader: &mut impl Read) -> Result<Option<Vec<(String, String)>>> {
+    let first = read_pkt_line(reader)?;
+    let mut items = Vec::new();
+
+    match first {
+        PktRead::Eof => return Ok(None),
+        PktRead::Flush => return Ok(Some(items)),
+        PktRead::Data(data) => items.push(parse_kv(&data)?),
+    }
+
+    loop {
+        match read_pkt_line(reader)? {
+            PktRead::Data(data) => items.push(parse_kv(&data)?),
+            PktRead::Flush => return Ok(Some(items)),
+            PktRead::Eof => anyhow::bail!("unexpected EOF while reading key/value pkt-list"),
+        }
+    }
+}
+
+fn parse_kv(data: &[u8]) -> Result<(String, String)> {
+    let text = std::str::from_utf8(data).context("pkt key/value line is not utf8")?;
+    let mut split = text.splitn(2, '=');
+    let key = split.next().unwrap_or_default();
+    let value = split
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("pkt key/value line missing '='"))?;
+    Ok((key.to_string(), value.to_string()))
+}
+
+fn read_pkt_content(reader: &mut impl Read) -> Result<Vec<u8>> {
+    let mut content = Vec::new();
+    loop {
+        match read_pkt_line(reader)? {
+            PktRead::Data(data) => content.extend_from_slice(&data),
+            PktRead::Flush => return Ok(content),
+            PktRead::Eof => anyhow::bail!("unexpected EOF while reading pkt content"),
+        }
+    }
+}
+
+fn write_pkt_content(writer: &mut impl Write, content: &[u8]) -> Result<()> {
+    const CHUNK: usize = 65516;
+    for chunk in content.chunks(CHUNK) {
+        write_pkt_line(writer, chunk)?;
+    }
+    write_pkt_flush(writer)
+}
+
+fn handle_filter_handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<()> {
+    let hello = read_pkt_kv_or_literal_list(reader)?;
+    let caps = read_pkt_kv_or_literal_list(reader)?;
+
+    let has_client = hello.iter().any(|s| s == "git-filter-client");
+    let has_v2 = hello.iter().any(|s| s == "version=2") || caps.iter().any(|s| s == "version=2");
+
+    if !has_client || !has_v2 {
+        anyhow::bail!("unsupported filter-process handshake");
+    }
+
+    write_pkt_line(writer, b"git-filter-server")?;
+    write_pkt_line(writer, b"version=2")?;
+    write_pkt_flush(writer)?;
+    write_pkt_line(writer, b"capability=clean")?;
+    write_pkt_line(writer, b"capability=smudge")?;
+    write_pkt_flush(writer)?;
+    writer
+        .flush()
+        .context("failed flushing handshake response")?;
+    Ok(())
+}
+
+fn read_pkt_kv_or_literal_list(reader: &mut impl Read) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    loop {
+        match read_pkt_line(reader)? {
+            PktRead::Data(data) => {
+                let text = String::from_utf8(data).context("handshake packet not utf8")?;
+                out.push(text);
+            }
+            PktRead::Flush => return Ok(out),
+            PktRead::Eof => anyhow::bail!("unexpected EOF during handshake"),
+        }
+    }
+}
+
+fn run_filter_command(command: &str, pathname: &str, input: &[u8]) -> Result<Vec<u8>> {
+    let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
+    let key = repo_key_from_session()?;
+
+    match command {
+        "clean" => clean(&manifest, key.as_deref(), pathname, input),
+        "smudge" => smudge(&manifest, key.as_deref(), pathname, input),
+        _ => anyhow::bail!("unsupported filter command: {command}"),
+    }
+}
+
+fn write_status_only(writer: &mut impl Write, status: &str) -> Result<()> {
+    write_pkt_line(writer, format!("status={status}").as_bytes())?;
+    write_pkt_flush(writer)?;
+    writer
+        .flush()
+        .context("failed flushing status-only response")?;
+    Ok(())
+}
+
+fn write_filter_success(writer: &mut impl Write, content: &[u8]) -> Result<()> {
+    write_pkt_line(writer, b"status=success")?;
+    write_pkt_flush(writer)?;
+    write_pkt_content(writer, content)?;
+    write_pkt_flush(writer)?;
+    writer.flush().context("failed flushing success response")?;
+    Ok(())
+}
+
+fn write_empty_success_list_available_blobs(writer: &mut impl Write) -> Result<()> {
+    write_pkt_flush(writer)?;
+    write_pkt_line(writer, b"status=success")?;
+    write_pkt_flush(writer)?;
+    writer
+        .flush()
+        .context("failed flushing list_available_blobs response")?;
+    Ok(())
 }

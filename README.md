@@ -33,5 +33,5 @@ Current domains:
 
 ## Important implementation note
 
-`filter-process` protocol is not implemented yet; git filter wiring currently uses
-`clean`/`smudge` subprocess commands.
+The long-running `filter-process` protocol is implemented and configured. The
+single-blob `clean`/`smudge` commands remain available as explicit fallbacks.
