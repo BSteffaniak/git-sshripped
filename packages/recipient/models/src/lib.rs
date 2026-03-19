@@ -6,7 +6,12 @@
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RecipientSource {
     LocalFile,
-    GithubKeysUrl,
+    #[serde(alias = "GITHUB_KEYS_URL")]
+    LegacyGithubKeysUrl,
+    GithubKeys {
+        url: String,
+        username: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

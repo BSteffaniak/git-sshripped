@@ -25,6 +25,18 @@ fn run_ok(cmd: &mut Command) {
     );
 }
 
+fn run_ok_output(cmd: &mut Command) -> String {
+    let output = cmd.output().expect("command execution should succeed");
+    assert!(
+        output.status.success(),
+        "command failed: status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
 fn configure_filter_paths(repo: &std::path::Path, bin: &str) {
     run_ok(Command::new("git").current_dir(repo).args([
         "config",
@@ -102,4 +114,39 @@ fn ci_smoke_init_unlock_doctor_verify() {
             .current_dir(repo)
             .args(["verify", "--strict"]),
     );
+
+    run_ok(Command::new(bin).current_dir(repo).args(["install"]));
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["refresh-github-keys"]),
+    );
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "access-audit",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let users = run_ok_output(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["list-users", "--verbose"]),
+    );
+    assert!(users.contains("wrapped=true"));
+
+    let export_path = repo.join("repo-key.hex");
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "export-repo-key",
+        "--out",
+        export_path.to_str().expect("export path should be utf8"),
+    ]));
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "import-repo-key",
+        "--input",
+        export_path.to_str().expect("export path should be utf8"),
+    ]));
 }

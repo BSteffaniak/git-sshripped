@@ -14,9 +14,10 @@ use git_ssh_crypt_cli_models::InitOptions;
 use git_ssh_crypt_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
 use git_ssh_crypt_filter::{clean, diff, is_protected_path, smudge};
 use git_ssh_crypt_recipient::{
-    add_recipient_from_public_key, add_recipients_from_github_keys, list_recipients,
-    remove_recipient_by_fingerprint, wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient,
-    wrapped_store_dir,
+    add_recipient_from_public_key, add_recipients_from_github_keys,
+    add_recipients_from_github_source, add_recipients_from_github_username, list_recipients,
+    remove_recipient_by_fingerprint, remove_recipients_by_fingerprints,
+    wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
 };
 use git_ssh_crypt_recipient_models::RecipientSource;
 use git_ssh_crypt_repository::{
@@ -72,6 +73,8 @@ enum Command {
         key_hex: Option<String>,
         #[arg(long = "identity")]
         identities: Vec<String>,
+        #[arg(long = "github-user")]
+        github_user: Option<String>,
     },
     Lock,
     Status,
@@ -87,13 +90,33 @@ enum Command {
         key: Option<String>,
         #[arg(long)]
         github_keys_url: Option<String>,
+        #[arg(long)]
+        github_user: Option<String>,
     },
-    ListUsers,
+    ListUsers {
+        #[arg(long)]
+        verbose: bool,
+    },
+    RefreshGithubKeys,
+    AccessAudit {
+        #[arg(long = "identity")]
+        identities: Vec<String>,
+    },
     RemoveUser {
         #[arg(long)]
         fingerprint: String,
         #[arg(long)]
         force: bool,
+    },
+    Install,
+    MigrateFromGitCrypt,
+    ExportRepoKey {
+        #[arg(long)]
+        out: String,
+    },
+    ImportRepoKey {
+        #[arg(long)]
+        input: String,
     },
     Verify {
         #[arg(long)]
@@ -134,7 +157,8 @@ fn main() -> Result<()> {
         Command::Unlock {
             key_hex,
             identities,
-        } => cmd_unlock(key_hex, identities),
+            github_user,
+        } => cmd_unlock(key_hex, identities, github_user),
         Command::Lock => cmd_lock(),
         Command::Status => cmd_status(),
         Command::Doctor => cmd_doctor(),
@@ -144,9 +168,16 @@ fn main() -> Result<()> {
         Command::AddUser {
             key,
             github_keys_url,
-        } => cmd_add_user(key, github_keys_url),
-        Command::ListUsers => cmd_list_users(),
+            github_user,
+        } => cmd_add_user(key, github_keys_url, github_user),
+        Command::ListUsers { verbose } => cmd_list_users(verbose),
+        Command::RefreshGithubKeys => cmd_refresh_github_keys(),
+        Command::AccessAudit { identities } => cmd_access_audit(identities),
         Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
+        Command::Install => cmd_install(),
+        Command::MigrateFromGitCrypt => cmd_migrate_from_git_crypt(),
+        Command::ExportRepoKey { out } => cmd_export_repo_key(&out),
+        Command::ImportRepoKey { input } => cmd_import_repo_key(&input),
         Command::Verify { strict } => cmd_verify(strict),
         Command::Clean { path } => cmd_clean(&path),
         Command::Smudge { path } => cmd_smudge(&path),
@@ -274,7 +305,7 @@ fn cmd_init(
     }
 
     for url in github_keys_urls {
-        let recipients = add_recipients_from_github_keys(&repo_root, &url)?;
+        let recipients = add_recipients_from_github_source(&repo_root, &url, None)?;
         added_recipients.extend(recipients);
     }
 
@@ -312,7 +343,11 @@ fn cmd_init(
     Ok(())
 }
 
-fn cmd_unlock(key_hex: Option<String>, identities: Vec<String>) -> Result<()> {
+fn cmd_unlock(
+    key_hex: Option<String>,
+    identities: Vec<String>,
+    github_user: Option<String>,
+) -> Result<()> {
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
 
@@ -328,7 +363,26 @@ fn cmd_unlock(key_hex: Option<String>, identities: Vec<String>) -> Result<()> {
             identities.into_iter().map(PathBuf::from).collect()
         };
 
-        let wrapped_files = wrapped_key_files(&repo_root)?;
+        let mut wrapped_files = wrapped_key_files(&repo_root)?;
+        if let Some(user) = github_user {
+            let recipients = list_recipients(&repo_root)?;
+            let allowed: std::collections::HashSet<String> = recipients
+                .iter()
+                .filter_map(|recipient| match &recipient.source {
+                    RecipientSource::GithubKeys { username, .. }
+                        if username.as_deref() == Some(&user) =>
+                    {
+                        Some(format!("{}.age", recipient.fingerprint))
+                    }
+                    _ => None,
+                })
+                .collect();
+            wrapped_files.retain(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| allowed.contains(name))
+            });
+        }
         if wrapped_files.is_empty() {
             anyhow::bail!(
                 "no wrapped key files found in {}; run init or rewrap first",
@@ -393,7 +447,11 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn cmd_add_user(key: Option<String>, github_keys_url: Option<String>) -> Result<()> {
+fn cmd_add_user(
+    key: Option<String>,
+    github_keys_url: Option<String>,
+    github_user: Option<String>,
+) -> Result<()> {
     let repo_root = current_repo_root()?;
     let session_key = repo_key_from_session()?;
 
@@ -403,6 +461,16 @@ fn cmd_add_user(key: Option<String>, github_keys_url: Option<String>) -> Result<
         let added = add_recipients_from_github_keys(&repo_root, &url)?;
         new_recipients.extend(added);
         println!("added {} recipients from {}", new_recipients.len(), url);
+    }
+
+    if let Some(username) = github_user {
+        let added = add_recipients_from_github_username(&repo_root, &username)?;
+        println!(
+            "added {} recipients from github user {}",
+            added.len(),
+            username
+        );
+        new_recipients.extend(added);
     }
 
     if let Some(key_input) = key {
@@ -423,7 +491,9 @@ fn cmd_add_user(key: Option<String>, github_keys_url: Option<String>) -> Result<
     }
 
     if new_recipients.is_empty() {
-        anyhow::bail!("provide --key <pubkey|path.pub> or --github-keys-url <url>");
+        anyhow::bail!(
+            "provide --key <pubkey|path.pub>, --github-keys-url <url>, or --github-user <username>"
+        );
     }
 
     if let Some(key) = session_key {
@@ -442,7 +512,7 @@ fn cmd_add_user(key: Option<String>, github_keys_url: Option<String>) -> Result<
     Ok(())
 }
 
-fn cmd_list_users() -> Result<()> {
+fn cmd_list_users(verbose: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let recipients = list_recipients(&repo_root)?;
     if recipients.is_empty() {
@@ -450,11 +520,27 @@ fn cmd_list_users() -> Result<()> {
         return Ok(());
     }
 
+    let wrapped = wrapped_key_files(&repo_root)?;
+    let wrapped_names: std::collections::HashSet<String> = wrapped
+        .iter()
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(ToString::to_string)
+        })
+        .collect();
+
     for recipient in recipients {
-        println!(
-            "{} {} {:?}",
-            recipient.fingerprint, recipient.key_type, recipient.source
-        );
+        let wrapped_name = format!("{}.age", recipient.fingerprint);
+        let has_wrapped = wrapped_names.contains(&wrapped_name);
+        if verbose {
+            println!(
+                "{} key_type={} wrapped={} source={:?}",
+                recipient.fingerprint, recipient.key_type, has_wrapped, recipient.source
+            );
+        } else {
+            println!("{} {}", recipient.fingerprint, recipient.key_type);
+        }
     }
     Ok(())
 }
@@ -482,6 +568,186 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
     }
 
     println!("removed recipient {fingerprint}");
+    Ok(())
+}
+
+fn cmd_refresh_github_keys() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let recipients = list_recipients(&repo_root)?;
+
+    let mut sources = Vec::new();
+    for recipient in &recipients {
+        if let RecipientSource::GithubKeys { url, username } = &recipient.source {
+            sources.push((url.clone(), username.clone()));
+        }
+    }
+    sources.sort();
+    sources.dedup();
+
+    if sources.is_empty() {
+        println!("refresh-github-keys: no GitHub-backed recipients configured");
+        return Ok(());
+    }
+
+    let session_key = repo_key_from_session()?;
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+
+    for (url, username) in sources {
+        let before = list_recipients(&repo_root)?;
+        let before_set: std::collections::HashSet<String> = before
+            .iter()
+            .filter_map(|recipient| {
+                if let RecipientSource::GithubKeys {
+                    url: r_url,
+                    username: r_user,
+                } = &recipient.source
+                    && *r_url == url
+                    && *r_user == username
+                {
+                    Some(recipient.fingerprint.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let fetched = add_recipients_from_github_source(&repo_root, &url, username.clone())?;
+        let after_set: std::collections::HashSet<String> = fetched
+            .iter()
+            .map(|recipient| recipient.fingerprint.clone())
+            .collect();
+
+        let mut removed = Vec::new();
+        for fingerprint in before_set.difference(&after_set) {
+            removed.push(fingerprint.clone());
+        }
+        total_removed += remove_recipients_by_fingerprints(&repo_root, &removed)?;
+
+        if let Some(key) = session_key.as_deref() {
+            for recipient in &fetched {
+                wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+            }
+        }
+
+        total_added += fetched.len();
+        println!(
+            "refresh-github-keys: source={} fetched={} removed={}",
+            url,
+            fetched.len(),
+            removed.len()
+        );
+    }
+
+    println!(
+        "refresh-github-keys: complete added_or_refreshed={} removed={}",
+        total_added, total_removed
+    );
+    Ok(())
+}
+
+fn cmd_access_audit(identities: Vec<String>) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let recipients = list_recipients(&repo_root)?;
+    let identities = if identities.is_empty() {
+        default_private_key_candidates()
+    } else {
+        identities.into_iter().map(PathBuf::from).collect()
+    };
+
+    let mut accessible = 0usize;
+    for recipient in recipients {
+        let wrapped = wrapped_store_dir(&repo_root).join(format!("{}.age", recipient.fingerprint));
+        let can = unwrap_repo_key_from_wrapped_files(&[wrapped], &identities)?.is_some();
+        if can {
+            accessible += 1;
+        }
+        println!(
+            "{} key_type={} accessible={} source={:?}",
+            recipient.fingerprint, recipient.key_type, can, recipient.source
+        );
+    }
+
+    println!("access-audit: accessible recipients={accessible}");
+    Ok(())
+}
+
+fn cmd_install() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
+    install_gitattributes(&repo_root, &manifest.protected_patterns)?;
+    install_git_filters(&repo_root)?;
+    println!("install: refreshed gitattributes and git filter configuration");
+    Ok(())
+}
+
+fn cmd_migrate_from_git_crypt() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let path = repo_root.join(".gitattributes");
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+
+    let mut patterns = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !trimmed.contains("filter=git-crypt") {
+            continue;
+        }
+        if let Some(pattern) = trimmed.split_whitespace().next()
+            && !pattern.is_empty()
+        {
+            patterns.push(pattern.to_string());
+        }
+    }
+
+    if patterns.is_empty() {
+        anyhow::bail!("no git-crypt patterns found in .gitattributes");
+    }
+
+    patterns.sort();
+    patterns.dedup();
+
+    let mut manifest = read_manifest(&repo_root).unwrap_or_default();
+    manifest.protected_patterns = patterns;
+    write_manifest(&repo_root, &manifest)?;
+    install_gitattributes(&repo_root, &manifest.protected_patterns)?;
+    install_git_filters(&repo_root)?;
+
+    println!(
+        "migrate-from-git-crypt: imported {} pattern(s); run unlock + reencrypt to complete data migration",
+        manifest.protected_patterns.len()
+    );
+    Ok(())
+}
+
+fn cmd_export_repo_key(out: &str) -> Result<()> {
+    let Some(key) = repo_key_from_session()? else {
+        anyhow::bail!("repository is locked; run `git-ssh-crypt unlock` first");
+    };
+    let encoded = hex::encode(key);
+    fs::write(out, format!("{encoded}\n")).with_context(|| format!("failed to write {out}"))?;
+    println!("export-repo-key: wrote key material to {out}");
+    Ok(())
+}
+
+fn cmd_import_repo_key(input: &str) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let common_dir = current_common_dir()?;
+    let text = fs::read_to_string(input).with_context(|| format!("failed to read {input}"))?;
+    let key = hex::decode(text.trim()).context("import key file must contain hex key bytes")?;
+    if key.len() != 32 {
+        anyhow::bail!("imported key length must be 32 bytes, got {}", key.len());
+    }
+
+    let wrapped = wrap_repo_key_for_all_recipients(&repo_root, &key)?;
+    write_unlock_session(&common_dir, &key, "import")?;
+    println!(
+        "import-repo-key: imported key and wrapped for {} recipients",
+        wrapped.len()
+    );
     Ok(())
 }
 

@@ -112,6 +112,22 @@ pub fn add_recipient_from_public_key(
 }
 
 pub fn add_recipients_from_github_keys(repo_root: &Path, url: &str) -> Result<Vec<RecipientKey>> {
+    add_recipients_from_github_source(repo_root, url, None)
+}
+
+pub fn add_recipients_from_github_username(
+    repo_root: &Path,
+    username: &str,
+) -> Result<Vec<RecipientKey>> {
+    let url = format!("https://github.com/{username}.keys");
+    add_recipients_from_github_source(repo_root, &url, Some(username.to_string()))
+}
+
+pub fn add_recipients_from_github_source(
+    repo_root: &Path,
+    url: &str,
+    username: Option<String>,
+) -> Result<Vec<RecipientKey>> {
     let text = reqwest::blocking::get(url)
         .with_context(|| format!("failed to GET {url}"))?
         .error_for_status()
@@ -121,13 +137,32 @@ pub fn add_recipients_from_github_keys(repo_root: &Path, url: &str) -> Result<Ve
 
     let mut added = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let recipient =
-            add_recipient_from_public_key(repo_root, line, RecipientSource::GithubKeysUrl)
-                .with_context(|| format!("failed to add recipient from key line '{line}'"))?;
+        let recipient = add_recipient_from_public_key(
+            repo_root,
+            line,
+            RecipientSource::GithubKeys {
+                url: url.to_string(),
+                username: username.clone(),
+            },
+        )
+        .with_context(|| format!("failed to add recipient from key line '{line}'"))?;
         added.push(recipient);
     }
 
     Ok(added)
+}
+
+pub fn remove_recipients_by_fingerprints(
+    repo_root: &Path,
+    fingerprints: &[String],
+) -> Result<usize> {
+    let mut removed = 0;
+    for fingerprint in fingerprints {
+        if remove_recipient_by_fingerprint(repo_root, fingerprint)? {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 pub fn wrap_repo_key_for_recipient(

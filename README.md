@@ -34,17 +34,23 @@ Current domains:
 ## Commands
 
 - `git-ssh-crypt init [--strict]`
-- `git-ssh-crypt unlock [--identity <path>]`
+- `git-ssh-crypt unlock [--identity <path>] [--github-user <user>]`
 - `git-ssh-crypt lock`
 - `git-ssh-crypt status`
+- `git-ssh-crypt install`
 - `git-ssh-crypt doctor`
 - `git-ssh-crypt verify [--strict]`
-- `git-ssh-crypt add-user --key <pub|path>`
-- `git-ssh-crypt list-users`
+- `git-ssh-crypt add-user --key <pub|path> [--github-user <user>] [--github-keys-url <url>]`
+- `git-ssh-crypt list-users [--verbose]`
+- `git-ssh-crypt refresh-github-keys`
+- `git-ssh-crypt access-audit [--identity <path>]`
 - `git-ssh-crypt remove-user --fingerprint <fp> [--force]`
 - `git-ssh-crypt rewrap`
 - `git-ssh-crypt rotate-key [--auto-reencrypt]`
 - `git-ssh-crypt reencrypt`
+- `git-ssh-crypt migrate-from-git-crypt`
+- `git-ssh-crypt export-repo-key --out <path>`
+- `git-ssh-crypt import-repo-key --input <path>`
 
 ## Important implementation note
 
