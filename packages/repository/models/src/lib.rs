@@ -15,6 +15,8 @@ pub struct RepositoryManifest {
     pub min_recipients: usize,
     pub allowed_key_types: Vec<String>,
     pub require_doctor_clean_for_rotate: bool,
+    pub require_verify_strict_clean_for_rotate_revoke: bool,
+    pub max_source_staleness_hours: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -30,6 +32,8 @@ pub struct GithubUserSource {
     pub fingerprints: Vec<String>,
     pub last_refreshed_unix: u64,
     pub etag: Option<String>,
+    pub last_refresh_status_code: Option<String>,
+    pub last_refresh_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,6 +44,8 @@ pub struct GithubTeamSource {
     pub fingerprints: Vec<String>,
     pub last_refreshed_unix: u64,
     pub etag: Option<String>,
+    pub last_refresh_status_code: Option<String>,
+    pub last_refresh_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -63,6 +69,8 @@ impl Default for RepositoryManifest {
             min_recipients: 1,
             allowed_key_types: vec!["ssh-ed25519".to_string(), "ssh-rsa".to_string()],
             require_doctor_clean_for_rotate: false,
+            require_verify_strict_clean_for_rotate_revoke: false,
+            max_source_staleness_hours: None,
         }
     }
 }

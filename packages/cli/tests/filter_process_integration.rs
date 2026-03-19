@@ -872,6 +872,10 @@ fn policy_set_show_verify_json_roundtrip() {
         "ssh-ed25519",
         "--require-doctor-clean-for-rotate",
         "true",
+        "--require-verify-strict-clean-for-rotate-revoke",
+        "true",
+        "--max-source-staleness-hours",
+        "24",
     ]));
 
     let policy_show = String::from_utf8(run_ok(
@@ -884,6 +888,11 @@ fn policy_set_show_verify_json_roundtrip() {
         serde_json::from_str(&policy_show).expect("policy show should parse");
     assert_eq!(policy_json["min_recipients"], 1);
     assert_eq!(policy_json["require_doctor_clean_for_rotate"], true);
+    assert_eq!(
+        policy_json["require_verify_strict_clean_for_rotate_revoke"],
+        true
+    );
+    assert_eq!(policy_json["max_source_staleness_hours"], 24);
 
     run_ok(
         Command::new(bin)

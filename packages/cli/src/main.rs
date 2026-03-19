@@ -89,6 +89,10 @@ enum PolicyCommand {
         allow_key_types: Vec<String>,
         #[arg(long)]
         require_doctor_clean_for_rotate: Option<bool>,
+        #[arg(long)]
+        require_verify_strict_clean_for_rotate_revoke: Option<bool>,
+        #[arg(long)]
+        max_source_staleness_hours: Option<u64>,
     },
 }
 
@@ -537,6 +541,44 @@ fn now_unix() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+fn classify_github_refresh_error(err: &anyhow::Error) -> &'static str {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    if text.contains("status 401") || text.contains("unauthorized") {
+        return "auth_missing";
+    }
+    if text.contains("status 403") || text.contains("forbidden") {
+        return "permission_denied";
+    }
+    if text.contains("status 404") || text.contains("not found") {
+        return "not_found";
+    }
+    if text.contains("status 429") || text.contains("rate limit") {
+        return "rate_limited";
+    }
+    if text.contains("timed out") || text.contains("connection") || text.contains("dns") {
+        return "backend_unavailable";
+    }
+    "unknown"
+}
+
+fn enforce_verify_clean_for_sensitive_actions(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    action: &str,
+) -> Result<()> {
+    if !manifest.require_verify_strict_clean_for_rotate_revoke {
+        return Ok(());
+    }
+    let failures = verify_failures_with_manifest(repo_root, manifest)?;
+    if failures.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{action} blocked by manifest policy require_verify_strict_clean_for_rotate_revoke=true; run `git-ssh-crypt verify --strict` and fix: {}",
+        failures.join("; ")
+    )
+}
+
 fn parse_github_auth_mode(raw: &str) -> Result<GithubAuthMode> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(GithubAuthMode::Auto),
@@ -691,11 +733,8 @@ fn collect_doctor_failures(
     if manifest.allowed_key_types.is_empty() {
         failures.push("manifest allowed_key_types cannot be empty".to_string());
     }
-    if manifest.repo_key_id.is_none() {
-        failures.push(
-            "manifest repo_key_id is missing; run `git-ssh-crypt unlock` to bind current key"
-                .to_string(),
-        );
+    if manifest.max_source_staleness_hours == Some(0) {
+        failures.push("manifest max_source_staleness_hours must be > 0 when set".to_string());
     }
     if manifest.repo_key_id.is_none() {
         failures.push(
@@ -743,6 +782,44 @@ fn collect_doctor_failures(
                 "recipient {} uses disallowed key type {}",
                 recipient.fingerprint, recipient.key_type
             ));
+        }
+    }
+
+    if let Some(max_hours) = manifest.max_source_staleness_hours {
+        let registry = read_github_sources(repo_root)?;
+        let max_age_secs = max_hours.saturating_mul(3600);
+        let now = now_unix();
+        for user in &registry.users {
+            if user.last_refreshed_unix == 0 {
+                failures.push(format!(
+                    "github user source {} has never been refreshed",
+                    user.username
+                ));
+                continue;
+            }
+            let age = now.saturating_sub(user.last_refreshed_unix);
+            if age > max_age_secs {
+                failures.push(format!(
+                    "github user source {} is stale ({}s > {}s)",
+                    user.username, age, max_age_secs
+                ));
+            }
+        }
+        for team in &registry.teams {
+            if team.last_refreshed_unix == 0 {
+                failures.push(format!(
+                    "github team source {}/{} has never been refreshed",
+                    team.org, team.team
+                ));
+                continue;
+            }
+            let age = now.saturating_sub(team.last_refreshed_unix);
+            if age > max_age_secs {
+                failures.push(format!(
+                    "github team source {}/{} is stale ({}s > {}s)",
+                    team.org, team.team, age, max_age_secs
+                ));
+            }
         }
     }
 
@@ -1087,6 +1164,15 @@ fn cmd_status(json: bool) -> Result<()> {
     let helper = resolve_agent_helper(&repo_root)?;
     let protected_count = protected_tracked_files(&repo_root, &manifest)?.len();
     let drift_count = verify_failures_with_manifest(&repo_root, &manifest)?.len();
+    let session_matches_manifest = if let Some(s) = session.as_ref() {
+        if let Some(expected) = manifest.repo_key_id.as_ref() {
+            s.repo_key_id.as_deref() == Some(expected.as_str())
+        } else {
+            true
+        }
+    } else {
+        true
+    };
 
     if json {
         let payload = serde_json::json!({
@@ -1099,6 +1185,8 @@ fn cmd_status(json: bool) -> Result<()> {
             "min_recipients": manifest.min_recipients,
             "allowed_key_types": manifest.allowed_key_types,
             "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
+            "require_verify_strict_clean_for_rotate_revoke": manifest.require_verify_strict_clean_for_rotate_revoke,
+            "max_source_staleness_hours": manifest.max_source_staleness_hours,
             "identity": {"label": identity.label, "source": format!("{:?}", identity.source)},
             "recipients": recipients.len(),
             "wrapped_keys": wrapped_files.len(),
@@ -1106,6 +1194,7 @@ fn cmd_status(json: bool) -> Result<()> {
             "drift_failures": drift_count,
             "unlock_source": session.as_ref().map(|s| s.key_source.clone()),
             "unlock_repo_key_id": session.as_ref().and_then(|s| s.repo_key_id.clone()),
+            "session_matches_manifest": session_matches_manifest,
             "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
             "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
             "protected_patterns": manifest.protected_patterns,
@@ -1139,6 +1228,16 @@ fn cmd_status(json: bool) -> Result<()> {
         "require_doctor_clean_for_rotate: {}",
         manifest.require_doctor_clean_for_rotate
     );
+    println!(
+        "require_verify_strict_clean_for_rotate_revoke: {}",
+        manifest.require_verify_strict_clean_for_rotate_revoke
+    );
+    println!(
+        "max_source_staleness_hours: {}",
+        manifest
+            .max_source_staleness_hours
+            .map_or_else(|| "none".to_string(), |v| v.to_string())
+    );
     println!("identity: {} ({:?})", identity.label, identity.source);
     println!("recipients: {}", recipients.len());
     println!("wrapped keys: {}", wrapped_files.len());
@@ -1150,6 +1249,9 @@ fn cmd_status(json: bool) -> Result<()> {
             "unlock repo_key_id: {}",
             session.repo_key_id.as_deref().unwrap_or("missing")
         );
+        if !session_matches_manifest {
+            println!("unlock session: stale (run `git-ssh-crypt unlock` in this worktree)");
+        }
     }
     match helper {
         Some((path, source)) => println!("agent helper: {} ({})", path.display(), source),
@@ -1323,6 +1425,8 @@ fn cmd_revoke_user(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
+    enforce_verify_clean_for_sensitive_actions(&repo_root, &manifest, "revoke-user")?;
     let mut removed_fingerprints = Vec::new();
 
     let selectors = usize::from(fingerprint.is_some())
@@ -1363,7 +1467,6 @@ fn cmd_revoke_user(
                 .iter()
                 .filter(|fp| !fingerprint_in_other_sources(&registry, fp, Some(&username), None))
                 .count();
-            let manifest = read_manifest(&repo_root)?;
             enforce_min_recipients(
                 &manifest,
                 recipients_count.saturating_sub(would_remove),
@@ -1414,7 +1517,6 @@ fn cmd_revoke_user(
 
     let mut refreshed = 0usize;
     if auto_reencrypt {
-        let manifest = read_manifest(&repo_root)?;
         refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
     }
 
@@ -1485,6 +1587,8 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
         fingerprints,
         last_refreshed_unix: now_unix(),
         etag: None,
+        last_refresh_status_code: Some("ok".to_string()),
+        last_refresh_message: Some("added source".to_string()),
     });
     write_github_sources(&repo_root, &registry)?;
 
@@ -1502,11 +1606,16 @@ fn cmd_list_github_users(verbose: bool) -> Result<()> {
     for source in registry.users {
         if verbose {
             println!(
-                "username={} url={} fingerprints={} refreshed={}",
+                "username={} url={} fingerprints={} refreshed={} status={} message={}",
                 source.username,
                 source.url,
                 source.fingerprints.len(),
-                source.last_refreshed_unix
+                source.last_refreshed_unix,
+                source
+                    .last_refresh_status_code
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                source.last_refresh_message.as_deref().unwrap_or("none")
             );
         } else {
             println!("{}", source.username);
@@ -1609,6 +1718,8 @@ fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
         fingerprints: fingerprints.into_iter().collect(),
         last_refreshed_unix: now_unix(),
         etag: team_etag,
+        last_refresh_status_code: Some("ok".to_string()),
+        last_refresh_message: Some("added source".to_string()),
     });
     write_github_sources(&repo_root, &registry)?;
     println!("add-github-team: added source for {org}/{team}");
@@ -1624,12 +1735,17 @@ fn cmd_list_github_teams() -> Result<()> {
     }
     for source in registry.teams {
         println!(
-            "{}/{} members={} fingerprints={} refreshed={}",
+            "{}/{} members={} fingerprints={} refreshed={} status={} message={}",
             source.org,
             source.team,
             source.member_usernames.len(),
             source.fingerprints.len(),
-            source.last_refreshed_unix
+            source.last_refreshed_unix,
+            source
+                .last_refresh_status_code
+                .as_deref()
+                .unwrap_or("unknown"),
+            source.last_refresh_message.as_deref().unwrap_or("none")
         );
     }
     Ok(())
@@ -1699,6 +1815,7 @@ fn cmd_refresh_github_keys(
     let session_key = repo_key_from_session()?;
     let mut events = Vec::new();
     let mut drift_detected = false;
+    let mut refresh_errors = Vec::new();
 
     for source in targets {
         let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
@@ -1707,15 +1824,51 @@ fn cmd_refresh_github_keys(
             .collect();
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
-        let fetched_user = fetch_github_user_keys_with_options(
+        let fetched_user = match fetch_github_user_keys_with_options(
             &source.username,
             &github_options,
             source.etag.as_deref(),
-        )?;
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let code = classify_github_refresh_error(&err).to_string();
+                let message = format!("{err:#}");
+                if !dry_run
+                    && let Some(entry) = registry
+                        .users
+                        .iter_mut()
+                        .find(|entry| entry.username == source.username)
+                {
+                    entry.last_refresh_status_code = Some(code.clone());
+                    entry.last_refresh_message = Some(message.clone());
+                    entry.last_refreshed_unix = now_unix();
+                }
+                refresh_errors.push(format!("{}: {}", source.username, message));
+                events.push(serde_json::json!({
+                    "username": source.username,
+                    "ok": false,
+                    "error_code": code,
+                    "error": message,
+                    "dry_run": dry_run,
+                }));
+                continue;
+            }
+        };
 
         if fetched_user.metadata.not_modified {
+            if !dry_run
+                && let Some(entry) = registry
+                    .users
+                    .iter_mut()
+                    .find(|entry| entry.username == source.username)
+            {
+                entry.last_refresh_status_code = Some("not_modified".to_string());
+                entry.last_refresh_message = Some("source unchanged (etag)".to_string());
+                entry.last_refreshed_unix = now_unix();
+            }
             events.push(serde_json::json!({
                 "username": source.username,
+                "ok": true,
                 "added": Vec::<String>::new(),
                 "removed": Vec::<String>::new(),
                 "unchanged": before_set.len(),
@@ -1799,11 +1952,14 @@ fn cmd_refresh_github_keys(
                 entry.fingerprints = after_set.iter().cloned().collect();
                 entry.last_refreshed_unix = now_unix();
                 entry.etag = fetched_user.metadata.etag.clone();
+                entry.last_refresh_status_code = Some("ok".to_string());
+                entry.last_refresh_message = Some("refresh succeeded".to_string());
             }
         }
 
         events.push(serde_json::json!({
             "username": source.username,
+            "ok": true,
             "added": added,
             "removed": removed,
             "unchanged": unchanged,
@@ -1839,6 +1995,14 @@ fn cmd_refresh_github_keys(
         anyhow::bail!("refresh-github-keys detected access drift");
     }
 
+    if !refresh_errors.is_empty() {
+        anyhow::bail!(
+            "refresh-github-keys failed for {} source(s): {}",
+            refresh_errors.len(),
+            refresh_errors.join(" | ")
+        );
+    }
+
     Ok(())
 }
 
@@ -1868,14 +2032,41 @@ fn cmd_refresh_github_teams(
     let session_key = repo_key_from_session()?;
     let mut events = Vec::new();
     let mut drift_detected = false;
+    let mut refresh_errors = Vec::new();
 
     for source in targets {
-        let fetched_team = fetch_github_team_members_with_options(
+        let fetched_team = match fetch_github_team_members_with_options(
             &source.org,
             &source.team,
             &github_options,
             source.etag.as_deref(),
-        )?;
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let code = classify_github_refresh_error(&err).to_string();
+                let message = format!("{err:#}");
+                if !dry_run
+                    && let Some(entry) = registry
+                        .teams
+                        .iter_mut()
+                        .find(|entry| entry.org == source.org && entry.team == source.team)
+                {
+                    entry.last_refresh_status_code = Some(code.clone());
+                    entry.last_refresh_message = Some(message.clone());
+                    entry.last_refreshed_unix = now_unix();
+                }
+                refresh_errors.push(format!("{}/{}: {}", source.org, source.team, message));
+                events.push(serde_json::json!({
+                    "org": source.org,
+                    "team": source.team,
+                    "ok": false,
+                    "error_code": code,
+                    "error": message,
+                    "dry_run": dry_run,
+                }));
+                continue;
+            }
+        };
         let fetched_team_metadata = fetched_team.metadata.clone();
         let fetched_team_auth_mode = fetched_team.auth_mode;
         let members = fetched_team.members;
@@ -1886,9 +2077,20 @@ fn cmd_refresh_github_teams(
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
         if fetched_team_metadata.not_modified {
+            if !dry_run
+                && let Some(entry) = registry
+                    .teams
+                    .iter_mut()
+                    .find(|entry| entry.org == source.org && entry.team == source.team)
+            {
+                entry.last_refresh_status_code = Some("not_modified".to_string());
+                entry.last_refresh_message = Some("source unchanged (etag)".to_string());
+                entry.last_refreshed_unix = now_unix();
+            }
             events.push(serde_json::json!({
                 "org": source.org,
                 "team": source.team,
+                "ok": true,
                 "added": Vec::<String>::new(),
                 "removed": Vec::<String>::new(),
                 "unchanged": before_set.len(),
@@ -1975,12 +2177,15 @@ fn cmd_refresh_github_teams(
                 entry.fingerprints = fetched_fingerprints.iter().cloned().collect();
                 entry.last_refreshed_unix = now_unix();
                 entry.etag = fetched_team_metadata.etag.clone();
+                entry.last_refresh_status_code = Some("ok".to_string());
+                entry.last_refresh_message = Some("refresh succeeded".to_string());
             }
         }
 
         events.push(serde_json::json!({
             "org": source.org,
             "team": source.team,
+            "ok": true,
             "added": added,
             "removed": removed,
             "unchanged": unchanged,
@@ -2014,6 +2219,14 @@ fn cmd_refresh_github_teams(
 
     if fail_on_drift && drift_detected {
         anyhow::bail!("refresh-github-teams detected access drift");
+    }
+
+    if !refresh_errors.is_empty() {
+        anyhow::bail!(
+            "refresh-github-teams failed for {} source(s): {}",
+            refresh_errors.len(),
+            refresh_errors.join(" | ")
+        );
     }
 
     Ok(())
@@ -2153,6 +2366,16 @@ fn cmd_policy(command: PolicyCommand) -> Result<()> {
                     "policy: require_doctor_clean_for_rotate {}",
                     manifest.require_doctor_clean_for_rotate
                 );
+                println!(
+                    "policy: require_verify_strict_clean_for_rotate_revoke {}",
+                    manifest.require_verify_strict_clean_for_rotate_revoke
+                );
+                println!(
+                    "policy: max_source_staleness_hours {}",
+                    manifest
+                        .max_source_staleness_hours
+                        .map_or_else(|| "none".to_string(), |v| v.to_string())
+                );
             }
             Ok(())
         }
@@ -2187,6 +2410,8 @@ fn cmd_policy(command: PolicyCommand) -> Result<()> {
             min_recipients,
             allow_key_types,
             require_doctor_clean_for_rotate,
+            require_verify_strict_clean_for_rotate_revoke,
+            max_source_staleness_hours,
         } => {
             let mut manifest = read_manifest(&repo_root)?;
             if let Some(min) = min_recipients {
@@ -2197,6 +2422,15 @@ fn cmd_policy(command: PolicyCommand) -> Result<()> {
             }
             if let Some(required) = require_doctor_clean_for_rotate {
                 manifest.require_doctor_clean_for_rotate = required;
+            }
+            if let Some(required) = require_verify_strict_clean_for_rotate_revoke {
+                manifest.require_verify_strict_clean_for_rotate_revoke = required;
+            }
+            if let Some(hours) = max_source_staleness_hours {
+                if hours == 0 {
+                    anyhow::bail!("policy set rejected: max_source_staleness_hours must be > 0");
+                }
+                manifest.max_source_staleness_hours = Some(hours);
             }
             if manifest.min_recipients == 0 {
                 anyhow::bail!("policy set rejected: min_recipients must be at least 1");
@@ -2218,6 +2452,10 @@ struct GitattributesMigrationPlan {
     legacy_lines_found: usize,
     legacy_lines_replaced: usize,
     duplicate_lines_removed: usize,
+    rewritable_lines: usize,
+    ambiguous_lines: Vec<String>,
+    manual_intervention_lines: Vec<String>,
+    idempotent_rewrite: bool,
 }
 
 fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan {
@@ -2227,6 +2465,9 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
     let mut legacy_lines_found = 0usize;
     let mut legacy_lines_replaced = 0usize;
     let mut duplicate_lines_removed = 0usize;
+    let mut rewritable_lines = 0usize;
+    let mut ambiguous_lines = Vec::new();
+    let mut manual_intervention_lines = Vec::new();
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -2242,6 +2483,23 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
 
         if trimmed.contains("filter=git-crypt") {
             legacy_lines_found += 1;
+            let mut tokens = trimmed.split_whitespace();
+            let _ = tokens.next();
+            let attrs: Vec<&str> = tokens.collect();
+            let non_standard_attrs = attrs
+                .iter()
+                .filter(|attr| {
+                    !attr.starts_with("filter=")
+                        && !attr.starts_with("diff=")
+                        && !attr.starts_with("text")
+                })
+                .count();
+            if non_standard_attrs > 0 {
+                ambiguous_lines.push(trimmed.to_string());
+            } else {
+                rewritable_lines += 1;
+            }
+
             legacy_lines_replaced += 1;
             patterns.insert(pattern.to_string());
             let normalized = format!("{pattern} filter=git-ssh-crypt diff=git-ssh-crypt");
@@ -2263,6 +2521,9 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
             continue;
         }
 
+        if trimmed.contains("git-crypt") {
+            manual_intervention_lines.push(trimmed.to_string());
+        }
         output_lines.push(line.to_string());
     }
 
@@ -2270,6 +2531,7 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
     if !rewritten_text.ends_with('\n') {
         rewritten_text.push('\n');
     }
+    let idempotent_rewrite = rewritten_text == text;
 
     GitattributesMigrationPlan {
         rewritten_text,
@@ -2277,6 +2539,10 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
         legacy_lines_found,
         legacy_lines_replaced,
         duplicate_lines_removed,
+        rewritable_lines,
+        ambiguous_lines,
+        manual_intervention_lines,
+        idempotent_rewrite,
     }
 }
 
@@ -2301,6 +2567,12 @@ fn cmd_migrate_from_git_crypt(
             "dry_run": dry_run,
             "noop": true,
             "reason": "no git-crypt or git-ssh-crypt patterns found",
+            "migration_analysis": {
+                "rewritable_lines": plan.rewritable_lines,
+                "ambiguous": plan.ambiguous_lines,
+                "manual_intervention": plan.manual_intervention_lines,
+                "idempotent_rewrite": plan.idempotent_rewrite,
+            }
         });
         if json {
             println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -2369,6 +2641,12 @@ fn cmd_migrate_from_git_crypt(
             "legacy_lines_replaced": plan.legacy_lines_replaced,
             "duplicate_lines_removed": plan.duplicate_lines_removed,
         },
+        "migration_analysis": {
+            "rewritable_lines": plan.rewritable_lines,
+            "ambiguous": plan.ambiguous_lines,
+            "manual_intervention": plan.manual_intervention_lines,
+            "idempotent_rewrite": plan.idempotent_rewrite,
+        },
         "imported_patterns": imported_patterns,
         "changed_patterns": changed_patterns,
         "repo_key_id": manifest_after.repo_key_id,
@@ -2391,11 +2669,14 @@ fn cmd_migrate_from_git_crypt(
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "migrate-from-git-crypt: patterns={} changed={} legacy_replaced={} duplicates_removed={} dry_run={} reencrypted={} verify={}",
+            "migrate-from-git-crypt: patterns={} changed={} legacy_replaced={} duplicates_removed={} rewritable={} ambiguous={} manual={} dry_run={} reencrypted={} verify={}",
             imported_patterns,
             changed_patterns,
             plan.legacy_lines_replaced,
             plan.duplicate_lines_removed,
+            plan.rewritable_lines,
+            plan.ambiguous_lines.len(),
+            plan.manual_intervention_lines.len(),
             dry_run,
             reencrypted_files,
             verify
@@ -2712,6 +2993,7 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
             );
         }
     }
+    enforce_verify_clean_for_sensitive_actions(&repo_root, &manifest, "rotate-key")?;
 
     let recipients = list_recipients(&repo_root)?;
     if recipients.is_empty() {
@@ -3060,6 +3342,8 @@ fn cmd_doctor(json: bool) -> Result<()> {
                 "min_recipients": manifest.min_recipients,
                 "allowed_key_types": manifest.allowed_key_types,
                 "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
+                "require_verify_strict_clean_for_rotate_revoke": manifest.require_verify_strict_clean_for_rotate_revoke,
+                "max_source_staleness_hours": manifest.max_source_staleness_hours,
                 "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
                 "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
                 "failures": failures,
@@ -3084,6 +3368,16 @@ fn cmd_doctor(json: bool) -> Result<()> {
         println!(
             "doctor: require_doctor_clean_for_rotate {}",
             manifest.require_doctor_clean_for_rotate
+        );
+        println!(
+            "doctor: require_verify_strict_clean_for_rotate_revoke {}",
+            manifest.require_verify_strict_clean_for_rotate_revoke
+        );
+        println!(
+            "doctor: max_source_staleness_hours {}",
+            manifest
+                .max_source_staleness_hours
+                .map_or_else(|| "none".to_string(), |v| v.to_string())
         );
     }
 
@@ -3558,12 +3852,33 @@ mod tests {
         assert_eq!(plan.legacy_lines_found, 2);
         assert_eq!(plan.legacy_lines_replaced, 2);
         assert_eq!(plan.duplicate_lines_removed, 1);
+        assert_eq!(plan.rewritable_lines, 2);
+        assert!(plan.ambiguous_lines.is_empty());
         assert!(
             plan.rewritten_text
                 .contains("secret.env filter=git-ssh-crypt diff=git-ssh-crypt")
         );
         assert!(!plan.rewritten_text.contains("filter=git-crypt"));
         assert_eq!(plan.patterns, vec!["secret.env".to_string()]);
+    }
+
+    #[test]
+    fn gitattributes_migration_classifies_ambiguous_lines() {
+        let input = "secrets/** filter=git-crypt diff=git-crypt merge=binary\n";
+        let plan = build_gitattributes_migration_plan(input);
+        assert_eq!(plan.legacy_lines_found, 1);
+        assert_eq!(plan.rewritable_lines, 0);
+        assert_eq!(plan.ambiguous_lines.len(), 1);
+    }
+
+    #[test]
+    fn github_refresh_error_classification_works() {
+        let auth = anyhow::anyhow!("request failed with status 401");
+        let perm = anyhow::anyhow!("request failed with status 403");
+        let rate = anyhow::anyhow!("request failed with status 429");
+        assert_eq!(classify_github_refresh_error(&auth), "auth_missing");
+        assert_eq!(classify_github_refresh_error(&perm), "permission_denied");
+        assert_eq!(classify_github_refresh_error(&rate), "rate_limited");
     }
 
     proptest! {

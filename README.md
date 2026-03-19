@@ -95,6 +95,8 @@ repo key (raw bytes or 64-char hex).
 - `git-ssh-crypt export-repo-key --out <path>`
 - `git-ssh-crypt import-repo-key --input <path>`
 - `git-ssh-crypt policy show|set|verify [--json]`
+- `git-ssh-crypt policy set --require-verify-strict-clean-for-rotate-revoke <true|false>`
+- `git-ssh-crypt policy set --max-source-staleness-hours <hours>`
 - `git-ssh-crypt config set-agent-helper <path>`
 - `git-ssh-crypt config set-github-api-base <url>`
 - `git-ssh-crypt config set-github-web-base <url>`
