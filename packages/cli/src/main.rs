@@ -162,8 +162,11 @@ enum Command {
         #[arg(long, conflicts_with = "auto_wrap")]
         no_auto_wrap: bool,
         /// Add all GitHub keys for the user, not just those matching local private keys
-        #[arg(long)]
+        #[arg(long, conflicts_with = "key")]
         all: bool,
+        /// Only add the GitHub key matching this public key line
+        #[arg(long, conflicts_with = "all")]
+        key: Option<String>,
     },
     ListGithubUsers {
         #[arg(long)]
@@ -337,7 +340,8 @@ fn main() -> Result<()> {
             auto_wrap,
             no_auto_wrap,
             all,
-        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap, all),
+            key,
+        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap, all, key),
         Command::ListGithubUsers { verbose } => cmd_list_github_users(verbose),
         Command::RemoveGithubUser { username, force } => cmd_remove_github_user(&username, force),
         Command::RefreshGithubKeys {
@@ -1620,7 +1624,12 @@ fn cmd_revoke_user(
     Ok(())
 }
 
-fn cmd_add_github_user(username: &str, auto_wrap: bool, all: bool) -> Result<()> {
+fn cmd_add_github_user(
+    username: &str,
+    auto_wrap: bool,
+    all: bool,
+    key: Option<String>,
+) -> Result<()> {
     let repo_root = current_repo_root()?;
     let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
@@ -1646,6 +1655,19 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool, all: bool) -> Result<()>
 
     let keys_to_add: Vec<&str> = if all {
         fetched_keys.clone()
+    } else if let Some(ref provided_key) = key {
+        // Match the provided public key against the fetched GitHub keys.
+        let provided_prefix = ssh_key_prefix(provided_key);
+        let matched: Vec<&str> = fetched_keys
+            .iter()
+            .filter(|github_key| ssh_key_prefix(github_key) == provided_prefix)
+            .copied()
+            .collect();
+
+        if matched.is_empty() {
+            anyhow::bail!("the provided key does not match any of {username}'s GitHub keys");
+        }
+        matched
     } else {
         // Discover local public keys and filter fetched keys to only those with a
         // matching local private key.
@@ -1664,7 +1686,7 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool, all: bool) -> Result<()>
         let skipped = fetched_keys.len() - matched.len();
         if matched.is_empty() {
             anyhow::bail!(
-                "none of {username}'s GitHub keys match a local private key in ~/.ssh/; pass --all to add all keys"
+                "none of {username}'s GitHub keys match a local private key in ~/.ssh/; pass --all to add all keys, or --key to specify one"
             );
         }
         if skipped > 0 {
