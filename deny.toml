@@ -37,4 +37,5 @@ skip = [
   { name = "thiserror-impl", version = "1.0.69" },
   { name = "toml", version = "0.5.11" },
   { name = "windows-sys", version = "0.52.0" },
+  { name = "windows-sys", version = "0.59.0" },
 ]
