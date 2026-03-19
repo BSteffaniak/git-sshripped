@@ -76,7 +76,10 @@ enum Command {
     Status,
     Doctor,
     Rewrap,
-    RotateKey,
+    RotateKey {
+        #[arg(long = "auto-reencrypt")]
+        auto_reencrypt: bool,
+    },
     Reencrypt,
     AddUser {
         #[arg(long)]
@@ -135,7 +138,7 @@ fn main() -> Result<()> {
         Command::Status => cmd_status(),
         Command::Doctor => cmd_doctor(),
         Command::Rewrap => cmd_rewrap(),
-        Command::RotateKey => cmd_rotate_key(),
+        Command::RotateKey { auto_reencrypt } => cmd_rotate_key(auto_reencrypt),
         Command::Reencrypt => cmd_reencrypt(),
         Command::AddUser {
             key,
@@ -565,34 +568,48 @@ fn cmd_rewrap() -> Result<()> {
     Ok(())
 }
 
-fn cmd_reencrypt() -> Result<()> {
-    let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
+fn reencrypt_with_current_session(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+) -> Result<usize> {
     if repo_key_from_session()?.is_none() {
         anyhow::bail!("repository is locked; run `git-ssh-crypt unlock` first");
     }
 
-    let protected = protected_tracked_files(&repo_root, &manifest)?;
+    let protected = protected_tracked_files(repo_root, manifest)?;
     if protected.is_empty() {
-        println!("reencrypt: no protected tracked files found");
-        return Ok(());
+        return Ok(0);
     }
 
     const CHUNK: usize = 100;
     for chunk in protected.chunks(CHUNK) {
-        git_add_paths(&repo_root, chunk, true)?;
+        git_add_paths(repo_root, chunk, true)?;
     }
 
-    println!("reencrypt: refreshed {} protected files", protected.len());
+    Ok(protected.len())
+}
+
+fn cmd_reencrypt() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
+
+    let refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
+    if refreshed == 0 {
+        println!("reencrypt: no protected tracked files found");
+        return Ok(());
+    }
+
+    println!("reencrypt: refreshed {} protected files", refreshed);
     Ok(())
 }
 
-fn cmd_rotate_key() -> Result<()> {
+fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
-    if repo_key_from_session()?.is_none() {
+    let Some(previous_key) = repo_key_from_session()? else {
         anyhow::bail!("repository is locked; run `git-ssh-crypt unlock` first");
-    }
+    };
+    let manifest = read_manifest(&repo_root)?;
 
     let recipients = list_recipients(&repo_root)?;
     if recipients.is_empty() {
@@ -608,7 +625,48 @@ fn cmd_rotate_key() -> Result<()> {
         "rotate-key: generated new repository key and wrapped for {} recipients",
         wrapped.len()
     );
-    println!("rotate-key: run `git-ssh-crypt reencrypt` and commit to complete rotation");
+    if auto_reencrypt {
+        match reencrypt_with_current_session(&repo_root, &manifest) {
+            Ok(count) => {
+                println!(
+                    "rotate-key: auto-reencrypt refreshed {} protected files",
+                    count
+                );
+            }
+            Err(err) => {
+                let mut rollback_errors = Vec::new();
+                if let Err(rollback_wrap_err) =
+                    wrap_repo_key_for_all_recipients(&repo_root, &previous_key)
+                {
+                    rollback_errors.push(format!("rewrap rollback failed: {rollback_wrap_err:#}"));
+                }
+                if let Err(rollback_session_err) =
+                    write_unlock_session(&common_dir, &previous_key, "rollback")
+                {
+                    rollback_errors
+                        .push(format!("session rollback failed: {rollback_session_err:#}"));
+                }
+                if rollback_errors.is_empty() {
+                    if let Err(restore_err) = reencrypt_with_current_session(&repo_root, &manifest)
+                    {
+                        rollback_errors.push(format!("reencrypt rollback failed: {restore_err:#}"));
+                    }
+                }
+
+                if rollback_errors.is_empty() {
+                    anyhow::bail!("rotate-key auto-reencrypt failed and was rolled back: {err:#}");
+                }
+
+                anyhow::bail!(
+                    "rotate-key auto-reencrypt failed: {err:#}; rollback encountered issues: {}",
+                    rollback_errors.join("; ")
+                );
+            }
+        }
+    } else {
+        println!("rotate-key: run `git-ssh-crypt reencrypt` and commit to complete rotation");
+    }
+
     Ok(())
 }
 

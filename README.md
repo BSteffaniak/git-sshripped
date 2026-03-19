@@ -43,7 +43,7 @@ Current domains:
 - `git-ssh-crypt list-users`
 - `git-ssh-crypt remove-user --fingerprint <fp> [--force]`
 - `git-ssh-crypt rewrap`
-- `git-ssh-crypt rotate-key`
+- `git-ssh-crypt rotate-key [--auto-reencrypt]`
 - `git-ssh-crypt reencrypt`
 
 ## Important implementation note

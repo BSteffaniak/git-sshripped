@@ -414,8 +414,11 @@ fn rotate_key_and_reencrypt_changes_encrypted_blob() {
     );
     assert!(before.starts_with(b"GSC1"));
 
-    run_ok(Command::new(bin).current_dir(repo).args(["rotate-key"]));
-    run_ok(Command::new(bin).current_dir(repo).args(["reencrypt"]));
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["rotate-key", "--auto-reencrypt"]),
+    );
     run_ok(
         Command::new("git")
             .current_dir(repo)
