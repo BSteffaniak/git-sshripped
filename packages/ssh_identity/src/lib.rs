@@ -3,13 +3,15 @@
 #![allow(clippy::multiple_crate_versions)]
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use age::Decryptor;
 use age::Identity;
 use age::ssh::Identity as SshIdentity;
 use anyhow::{Context, Result};
 use git_ssh_crypt_ssh_identity_models::{IdentityDescriptor, IdentitySource};
+use wait_timeout::ChildExt;
 
 #[must_use]
 pub fn default_public_key_candidates() -> Vec<PathBuf> {
@@ -117,23 +119,41 @@ fn parse_helper_key_output(output: &[u8]) -> Result<Option<Vec<u8>>> {
 
 pub fn unwrap_repo_key_with_agent_helper(
     wrapped_files: &[PathBuf],
+    helper_path: &std::path::Path,
+    timeout_ms: u64,
 ) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
-    let helper = std::env::var("GSC_SSH_AGENT_HELPER").ok();
-    let Some(helper) = helper else {
-        return Ok(None);
-    };
-
     for wrapped in wrapped_files {
-        let output = Command::new(&helper)
+        let mut child = Command::new(helper_path)
             .arg(wrapped)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| {
                 format!(
                     "failed running agent helper '{}': {}",
-                    helper,
+                    helper_path.display(),
                     wrapped.display()
                 )
             })?;
+
+        let timeout = Duration::from_millis(timeout_ms);
+        let status = child
+            .wait_timeout(timeout)
+            .context("failed waiting on agent helper process")?;
+
+        let output = if status.is_some() {
+            child
+                .wait_with_output()
+                .context("failed collecting agent helper output")?
+        } else {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "agent helper timed out after {}ms for {}",
+                timeout_ms,
+                wrapped.display()
+            );
+        };
 
         if !output.status.success() {
             continue;
@@ -147,7 +167,7 @@ pub fn unwrap_repo_key_with_agent_helper(
             key,
             IdentityDescriptor {
                 source: IdentitySource::SshAgent,
-                label: format!("{} ({})", helper, wrapped.display()),
+                label: format!("{} ({})", helper_path.display(), wrapped.display()),
             },
         )));
     }

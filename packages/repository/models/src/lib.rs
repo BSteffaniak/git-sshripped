@@ -35,6 +35,11 @@ pub struct GithubTeamSource {
     pub last_refreshed_unix: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct RepositoryLocalConfig {
+    pub agent_helper: Option<String>,
+}
+
 impl Default for RepositoryManifest {
     fn default() -> Self {
         Self {

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use git_ssh_crypt_repository_models::{GithubSourceRegistry, RepositoryManifest};
+use git_ssh_crypt_repository_models::{
+    GithubSourceRegistry, RepositoryLocalConfig, RepositoryManifest,
+};
 
 #[must_use]
 pub fn metadata_dir(repo_root: &Path) -> PathBuf {
@@ -22,6 +24,11 @@ pub fn manifest_file(repo_root: &Path) -> PathBuf {
 #[must_use]
 pub fn github_sources_file(repo_root: &Path) -> PathBuf {
     metadata_dir(repo_root).join("github-sources.toml")
+}
+
+#[must_use]
+pub fn local_config_file(repo_root: &Path) -> PathBuf {
+    metadata_dir(repo_root).join("config.toml")
 }
 
 pub fn write_manifest(repo_root: &Path, manifest: &RepositoryManifest) -> Result<()> {
@@ -59,6 +66,27 @@ pub fn write_github_sources(repo_root: &Path, registry: &GithubSourceRegistry) -
     let file = github_sources_file(repo_root);
     fs::write(&file, text)
         .with_context(|| format!("failed to write github source registry {}", file.display()))?;
+    Ok(())
+}
+
+pub fn read_local_config(repo_root: &Path) -> Result<RepositoryLocalConfig> {
+    let file = local_config_file(repo_root);
+    if !file.exists() {
+        return Ok(RepositoryLocalConfig::default());
+    }
+    let text = fs::read_to_string(&file)
+        .with_context(|| format!("failed to read repository config {}", file.display()))?;
+    toml::from_str(&text).context("failed to parse repository local config")
+}
+
+pub fn write_local_config(repo_root: &Path, config: &RepositoryLocalConfig) -> Result<()> {
+    let dir = metadata_dir(repo_root);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create metadata directory {}", dir.display()))?;
+    let text = toml::to_string_pretty(config).context("failed to serialize local config")?;
+    let file = local_config_file(repo_root);
+    fs::write(&file, text)
+        .with_context(|| format!("failed to write local config {}", file.display()))?;
     Ok(())
 }
 

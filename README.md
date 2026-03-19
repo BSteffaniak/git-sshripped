@@ -49,9 +49,14 @@ git-ssh-crypt lock
 
 - `git-ssh-crypt unlock [--identity <path>] [--github-user <user>] [--prefer-agent] [--no-agent]`
 
-`unlock` can use a direct agent helper if `GSC_SSH_AGENT_HELPER` is set.
-The helper is invoked as: `GSC_SSH_AGENT_HELPER <wrapped-key-file>` and must
-print the decrypted 32-byte repo key (raw bytes or 64-char hex) to stdout.
+`unlock` auto-resolves an agent helper in this order:
+1) `GSC_SSH_AGENT_HELPER` env var
+2) `git config --local git-ssh-crypt.agentHelper`
+3) `.git-ssh-crypt/config.toml` (`agent_helper`)
+4) PATH search (`git-ssh-crypt-agent-helper`, `age-plugin-ssh-agent`, `age-plugin-ssh`)
+
+Helper contract: `<helper> <wrapped-key-file>` -> stdout with decrypted 32-byte
+repo key (raw bytes or 64-char hex).
 - `git-ssh-crypt lock`
 - `git-ssh-crypt status`
 - `git-ssh-crypt doctor [--json]`
@@ -83,6 +88,8 @@ print the decrypted 32-byte repo key (raw bytes or 64-char hex) to stdout.
 - `git-ssh-crypt migrate-from-git-crypt [--dry-run] [--reencrypt] [--verify] [--json]`
 - `git-ssh-crypt export-repo-key --out <path>`
 - `git-ssh-crypt import-repo-key --input <path>`
+- `git-ssh-crypt config set-agent-helper <path>`
+- `git-ssh-crypt config show`
 
 ## Security notes
 

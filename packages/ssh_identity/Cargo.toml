@@ -15,6 +15,7 @@ age = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 dirs = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+wait-timeout = { workspace = true }
 
 [features]
 default = []

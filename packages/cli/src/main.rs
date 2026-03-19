@@ -22,11 +22,12 @@ use git_ssh_crypt_recipient::{
 };
 use git_ssh_crypt_recipient_models::RecipientSource;
 use git_ssh_crypt_repository::{
-    install_git_filters, install_gitattributes, read_github_sources, read_manifest,
-    write_github_sources, write_manifest,
+    install_git_filters, install_gitattributes, read_github_sources, read_local_config,
+    read_manifest, write_github_sources, write_local_config, write_manifest,
 };
 use git_ssh_crypt_repository_models::{
-    GithubSourceRegistry, GithubTeamSource, GithubUserSource, RepositoryManifest,
+    GithubSourceRegistry, GithubTeamSource, GithubUserSource, RepositoryLocalConfig,
+    RepositoryManifest,
 };
 use git_ssh_crypt_ssh_identity::{
     default_private_key_candidates, default_public_key_candidates, detect_identity,
@@ -57,6 +58,12 @@ impl From<CliAlgorithm> for EncryptionAlgorithm {
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    SetAgentHelper { path: String },
+    Show,
 }
 
 #[derive(Debug, Subcommand)]
@@ -215,6 +222,10 @@ enum Command {
         path: String,
     },
     FilterProcess,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
 }
 
 fn main() -> Result<()> {
@@ -295,6 +306,7 @@ fn main() -> Result<()> {
         Command::Smudge { path } => cmd_smudge(&path),
         Command::Diff { path } => cmd_diff(&path),
         Command::FilterProcess => cmd_filter_process(),
+        Command::Config { command } => cmd_config(command),
     }
 }
 
@@ -370,6 +382,71 @@ fn restore_wrapped_files(
     }
 
     Ok(())
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn find_helper_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_agent_helper(repo_root: &std::path::Path) -> Result<Option<(PathBuf, String)>> {
+    if let Ok(path) = std::env::var("GSC_SSH_AGENT_HELPER") {
+        let candidate = PathBuf::from(path);
+        if is_executable(&candidate) {
+            return Ok(Some((candidate, "env".to_string())));
+        }
+    }
+
+    if let Some(cfg_value) = git_local_config(repo_root, "git-ssh-crypt.agentHelper")? {
+        let candidate = PathBuf::from(cfg_value);
+        if is_executable(&candidate) {
+            return Ok(Some((candidate, "git-config".to_string())));
+        }
+    }
+
+    let local_cfg = read_local_config(repo_root)?;
+    if let Some(helper) = local_cfg.agent_helper {
+        let candidate = PathBuf::from(helper);
+        if is_executable(&candidate) {
+            return Ok(Some((candidate, "repo-config".to_string())));
+        }
+    }
+
+    for name in [
+        "git-ssh-crypt-agent-helper",
+        "age-plugin-ssh-agent",
+        "age-plugin-ssh",
+    ] {
+        if let Some(path) = find_helper_in_path(name) {
+            return Ok(Some((path, "path".to_string())));
+        }
+    }
+
+    Ok(None)
 }
 
 fn now_unix() -> u64 {
@@ -550,11 +627,20 @@ fn cmd_unlock(
             );
         }
 
-        if !no_agent
+        let resolved_helper = if no_agent {
+            None
+        } else {
+            resolve_agent_helper(&repo_root)?
+        };
+
+        if let Some((helper_path, source)) = resolved_helper
             && let Some((unwrapped, descriptor)) =
-                unwrap_repo_key_with_agent_helper(&wrapped_files)?
+                unwrap_repo_key_with_agent_helper(&wrapped_files, &helper_path, 3000)?
         {
-            (unwrapped, format!("agent-helper: {}", descriptor.label))
+            (
+                unwrapped,
+                format!("agent-helper[{source}]: {}", descriptor.label),
+            )
         } else {
             let Some((unwrapped, descriptor)) =
                 unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files)?
@@ -590,6 +676,7 @@ fn cmd_status(json: bool) -> Result<()> {
     let session = read_unlock_session(&common_dir)?;
     let recipients = list_recipients(&repo_root)?;
     let wrapped_files = wrapped_key_files(&repo_root)?;
+    let helper = resolve_agent_helper(&repo_root)?;
 
     if json {
         let payload = serde_json::json!({
@@ -602,6 +689,8 @@ fn cmd_status(json: bool) -> Result<()> {
             "recipients": recipients.len(),
             "wrapped_keys": wrapped_files.len(),
             "unlock_source": session.as_ref().map(|s| s.key_source.clone()),
+            "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
+            "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
             "protected_patterns": manifest.protected_patterns,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -625,6 +714,10 @@ fn cmd_status(json: bool) -> Result<()> {
     println!("wrapped keys: {}", wrapped_files.len());
     if let Some(session) = session {
         println!("unlock source: {}", session.key_source);
+    }
+    match helper {
+        Some((path, source)) => println!("agent helper: {} ({})", path.display(), source),
+        None => println!("agent helper: none"),
     }
     println!(
         "protected patterns: {}",
@@ -1209,6 +1302,28 @@ fn cmd_install() -> Result<()> {
     install_git_filters(&repo_root)?;
     println!("install: refreshed gitattributes and git filter configuration");
     Ok(())
+}
+
+fn cmd_config(command: ConfigCommand) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    match command {
+        ConfigCommand::SetAgentHelper { path } => {
+            let helper = PathBuf::from(&path);
+            if !is_executable(&helper) {
+                anyhow::bail!("agent helper path is not executable: {}", helper.display());
+            }
+            let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            cfg.agent_helper = Some(path);
+            write_local_config(&repo_root, &cfg)?;
+            println!("config: set agent helper to {}", helper.display());
+            Ok(())
+        }
+        ConfigCommand::Show => {
+            let cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1829,6 +1944,22 @@ fn cmd_doctor(json: bool) -> Result<()> {
         }
     }
 
+    let helper = resolve_agent_helper(&repo_root)?;
+    if !json {
+        match helper {
+            Some((ref path, ref source)) => {
+                println!(
+                    "check agent helper: PASS ({} from {})",
+                    path.display(),
+                    source
+                );
+            }
+            None => {
+                println!("check agent helper: PASS (none detected)");
+            }
+        }
+    }
+
     let session = read_unlock_session(&common_dir)?;
     if let Some(session) = session {
         let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
@@ -1863,6 +1994,8 @@ fn cmd_doctor(json: bool) -> Result<()> {
                 "algorithm": format!("{:?}", manifest.encryption_algorithm),
                 "strict_mode": manifest.strict_mode,
                 "protected_patterns": manifest.protected_patterns,
+                "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
+                "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
                 "failures": failures,
             }))?
         );

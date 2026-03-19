@@ -175,6 +175,12 @@ fn ci_smoke_init_unlock_doctor_verify() {
     assert!(migrate_out.contains("legacy.secret"));
 
     run_ok(Command::new(bin).current_dir(repo).args(["install"]));
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "config",
+        "set-agent-helper",
+        "/usr/bin/env",
+    ]));
+    run_ok(Command::new(bin).current_dir(repo).args(["config", "show"]));
     run_ok(
         Command::new(bin)
             .current_dir(repo)
