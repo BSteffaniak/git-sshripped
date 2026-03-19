@@ -1094,3 +1094,55 @@ fn unlock_with_encrypted_ssh_private_key_via_env_passphrase() {
     let unlocked_view = fs::read_to_string(&secret_file).expect("unlocked view should read utf8");
     assert_eq!(unlocked_view, "TOKEN=encrypted_identity\n");
 }
+
+#[test]
+fn unlock_with_encrypted_ssh_private_key_fails_with_wrong_env_passphrase() {
+    let bin = env!("CARGO_BIN_EXE_git-ssh-crypt");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let passphrase = "integration-passphrase";
+    let (private_key, public_key) =
+        generate_encrypted_ed25519_keypair(&keys_dir, "id_ed25519_enc_bad", passphrase);
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    configure_filter_paths(repo, bin);
+
+    let (_, stderr) = run_fail(
+        Command::new(bin)
+            .current_dir(repo)
+            .env("GSC_SSH_KEY_PASSPHRASE", "wrong-passphrase")
+            .args([
+                "unlock",
+                "--identity",
+                private_key
+                    .to_str()
+                    .expect("private key path should be utf8"),
+            ]),
+    );
+    assert!(
+        stderr.contains("could not decrypt any wrapped key")
+            || stderr.contains("key decryption")
+            || stderr.contains("invalid passphrase")
+    );
+}
