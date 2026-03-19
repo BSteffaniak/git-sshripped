@@ -64,10 +64,6 @@ pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()
 pub fn install_git_filters(repo_root: &Path) -> Result<()> {
     let pairs = [
         (
-            "filter.git-ssh-crypt.process",
-            "git-ssh-crypt filter-process",
-        ),
-        (
             "filter.git-ssh-crypt.clean",
             "git-ssh-crypt clean --path %f",
         ),

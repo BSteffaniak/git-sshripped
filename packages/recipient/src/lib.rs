@@ -78,7 +78,7 @@ pub fn add_recipient_from_public_key(
     hasher.update(key_type.as_bytes());
     hasher.update([b':']);
     hasher.update(key_body.as_bytes());
-    let fingerprint = base64::engine::general_purpose::STANDARD_NO_PAD.encode(hasher.finalize());
+    let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
     let recipient = RecipientKey {
         fingerprint: fingerprint.clone(),

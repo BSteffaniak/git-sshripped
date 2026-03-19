@@ -122,11 +122,13 @@ fn main() -> Result<()> {
 }
 
 fn current_repo_root() -> Result<PathBuf> {
-    git_toplevel(&std::env::current_dir().context("failed to read current dir")?)
+    let cwd = std::env::current_dir().context("failed to read current dir")?;
+    resolve_repo_root_for_filter(&cwd)
 }
 
 fn current_common_dir() -> Result<PathBuf> {
-    git_common_dir(&std::env::current_dir().context("failed to read current dir")?)
+    let cwd = std::env::current_dir().context("failed to read current dir")?;
+    resolve_common_dir_for_filter(&cwd)
 }
 
 fn wrapped_key_files(repo_root: &std::path::Path) -> Result<Vec<PathBuf>> {
@@ -370,9 +372,8 @@ fn cmd_rewrap() -> Result<()> {
     Ok(())
 }
 
-fn repo_key_from_session() -> Result<Option<Vec<u8>>> {
-    let common_dir = current_common_dir()?;
-    let maybe_session = read_unlock_session(&common_dir)?;
+fn repo_key_from_session_in(common_dir: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    let maybe_session = read_unlock_session(common_dir)?;
     let Some(session) = maybe_session else {
         return Ok(None);
     };
@@ -380,6 +381,11 @@ fn repo_key_from_session() -> Result<Option<Vec<u8>>> {
         .decode(session.key_b64)
         .context("invalid session key encoding")?;
     Ok(Some(key))
+}
+
+fn repo_key_from_session() -> Result<Option<Vec<u8>>> {
+    let common_dir = current_common_dir()?;
+    repo_key_from_session_in(&common_dir)
 }
 
 fn read_stdin_all() -> Result<Vec<u8>> {
@@ -425,6 +431,10 @@ fn cmd_diff(path: &str) -> Result<()> {
 }
 
 fn cmd_filter_process() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current dir")?;
+    let repo_root = resolve_repo_root_for_filter(&cwd)?;
+    let common_dir = resolve_common_dir_for_filter(&cwd)?;
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -458,7 +468,7 @@ fn cmd_filter_process() -> Result<()> {
 
         let input = read_pkt_content(&mut reader)?;
 
-        let result = run_filter_command(&command, &pathname, &input);
+        let result = run_filter_command(&repo_root, &common_dir, &command, &pathname, &input);
         match result {
             Ok(output) => write_filter_success(&mut writer, &output)?,
             Err(_) => write_status_only(&mut writer, "error")?,
@@ -469,6 +479,37 @@ fn cmd_filter_process() -> Result<()> {
         .flush()
         .context("failed to flush filter-process writer")?;
     Ok(())
+}
+
+fn resolve_repo_root_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
+    if let Some(work_tree) = std::env::var_os("GIT_WORK_TREE") {
+        let p = PathBuf::from(work_tree);
+        if p.is_absolute() {
+            return Ok(p);
+        }
+        return Ok(cwd.join(p));
+    }
+    git_toplevel(cwd)
+}
+
+fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
+    if let Some(common_dir) = std::env::var_os("GIT_COMMON_DIR") {
+        let p = PathBuf::from(common_dir);
+        if p.is_absolute() {
+            return Ok(p);
+        }
+        return Ok(cwd.join(p));
+    }
+
+    if let Some(git_dir) = std::env::var_os("GIT_DIR") {
+        let p = PathBuf::from(git_dir);
+        if p.is_absolute() {
+            return Ok(p);
+        }
+        return Ok(cwd.join(p));
+    }
+
+    git_common_dir(cwd)
 }
 
 #[derive(Debug)]
@@ -610,10 +651,15 @@ fn read_pkt_kv_or_literal_list(reader: &mut impl Read) -> Result<Vec<String>> {
     }
 }
 
-fn run_filter_command(command: &str, pathname: &str, input: &[u8]) -> Result<Vec<u8>> {
-    let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
-    let key = repo_key_from_session()?;
+fn run_filter_command(
+    repo_root: &std::path::Path,
+    common_dir: &std::path::Path,
+    command: &str,
+    pathname: &str,
+    input: &[u8],
+) -> Result<Vec<u8>> {
+    let manifest = read_manifest(repo_root)?;
+    let key = repo_key_from_session_in(common_dir)?;
 
     match command {
         "clean" => clean(&manifest, key.as_deref(), pathname, input),

@@ -34,3 +34,6 @@ rand = { workspace = true, features = ["std"] }
 default = ["crypto-aes-siv"]
 fail-on-warnings = []
 crypto-aes-siv = ["git_ssh_crypt_encryption/crypto-aes-siv"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
