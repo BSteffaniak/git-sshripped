@@ -33,6 +33,6 @@ Current domains:
 
 ## Important implementation note
 
-The `clean`/`smudge` commands are the default configured filter path today.
-The long-running `filter-process` command exists but is not enabled by default
-yet.
+The long-running `filter-process` protocol is enabled by default via git
+config. The single-blob `clean`/`smudge` commands remain available as explicit
+fallback commands.

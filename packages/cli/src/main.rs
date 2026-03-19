@@ -123,12 +123,12 @@ fn main() -> Result<()> {
 
 fn current_repo_root() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to read current dir")?;
-    resolve_repo_root_for_filter(&cwd)
+    resolve_repo_root_for_command(&cwd)
 }
 
 fn current_common_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to read current dir")?;
-    resolve_common_dir_for_filter(&cwd)
+    resolve_common_dir_for_command(&cwd)
 }
 
 fn wrapped_key_files(repo_root: &std::path::Path) -> Result<Vec<PathBuf>> {
@@ -440,12 +440,21 @@ fn cmd_filter_process() -> Result<()> {
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
 
-    handle_filter_handshake(&mut reader, &mut writer)?;
+    let mut pending_headers = handle_filter_handshake(&mut reader, &mut writer)?;
 
     loop {
-        let Some(headers) = read_pkt_kv_list(&mut reader)? else {
-            break;
+        let headers = if let Some(headers) = pending_headers.take() {
+            headers
+        } else {
+            let Some(headers) = read_pkt_kv_list(&mut reader)? else {
+                break;
+            };
+            headers
         };
+
+        if headers.is_empty() {
+            continue;
+        }
 
         let command = headers
             .iter()
@@ -489,7 +498,12 @@ fn resolve_repo_root_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
         }
         return Ok(cwd.join(p));
     }
-    git_toplevel(cwd)
+
+    if std::env::var_os("GIT_DIR").is_some() {
+        return Ok(cwd.to_path_buf());
+    }
+
+    Ok(cwd.to_path_buf())
 }
 
 fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
@@ -509,6 +523,20 @@ fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
         return Ok(cwd.join(p));
     }
 
+    Ok(cwd.join(".git"))
+}
+
+fn resolve_repo_root_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
+    if std::env::var_os("GIT_DIR").is_some() {
+        return resolve_repo_root_for_filter(cwd);
+    }
+    git_toplevel(cwd)
+}
+
+fn resolve_common_dir_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
+    if std::env::var_os("GIT_DIR").is_some() {
+        return resolve_common_dir_for_filter(cwd);
+    }
     git_common_dir(cwd)
 }
 
@@ -545,7 +573,7 @@ fn read_pkt_line(reader: &mut impl Read) -> Result<PktRead> {
     Ok(PktRead::Data(data))
 }
 
-fn write_pkt_line(writer: &mut impl Write, data: &[u8]) -> Result<()> {
+fn write_pkt_data_line(writer: &mut impl Write, data: &[u8]) -> Result<()> {
     if data.len() > 65516 {
         anyhow::bail!("pkt-line payload too large");
     }
@@ -557,6 +585,13 @@ fn write_pkt_line(writer: &mut impl Write, data: &[u8]) -> Result<()> {
         .write_all(data)
         .context("failed writing pkt-line payload")?;
     Ok(())
+}
+
+fn write_pkt_text_line(writer: &mut impl Write, text: &str) -> Result<()> {
+    let mut line = String::with_capacity(text.len() + 1);
+    line.push_str(text);
+    line.push('\n');
+    write_pkt_data_line(writer, line.as_bytes())
 }
 
 fn write_pkt_flush(writer: &mut impl Write) -> Result<()> {
@@ -586,7 +621,9 @@ fn read_pkt_kv_list(reader: &mut impl Read) -> Result<Option<Vec<(String, String
 }
 
 fn parse_kv(data: &[u8]) -> Result<(String, String)> {
-    let text = std::str::from_utf8(data).context("pkt key/value line is not utf8")?;
+    let text = std::str::from_utf8(data)
+        .context("pkt key/value line is not utf8")?
+        .trim_end_matches('\n');
     let mut split = text.splitn(2, '=');
     let key = split.next().unwrap_or_default();
     let value = split
@@ -609,32 +646,70 @@ fn read_pkt_content(reader: &mut impl Read) -> Result<Vec<u8>> {
 fn write_pkt_content(writer: &mut impl Write, content: &[u8]) -> Result<()> {
     const CHUNK: usize = 65516;
     for chunk in content.chunks(CHUNK) {
-        write_pkt_line(writer, chunk)?;
+        write_pkt_data_line(writer, chunk)?;
     }
     write_pkt_flush(writer)
 }
 
-fn handle_filter_handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<()> {
+fn handle_filter_handshake(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> Result<Option<Vec<(String, String)>>> {
     let hello = read_pkt_kv_or_literal_list(reader)?;
-    let caps = read_pkt_kv_or_literal_list(reader)?;
-
     let has_client = hello.iter().any(|s| s == "git-filter-client");
-    let has_v2 = hello.iter().any(|s| s == "version=2") || caps.iter().any(|s| s == "version=2");
+    let has_v2 = hello.iter().any(|s| s == "version=2");
 
     if !has_client || !has_v2 {
         anyhow::bail!("unsupported filter-process handshake");
     }
 
-    write_pkt_line(writer, b"git-filter-server")?;
-    write_pkt_line(writer, b"version=2")?;
-    write_pkt_flush(writer)?;
-    write_pkt_line(writer, b"capability=clean")?;
-    write_pkt_line(writer, b"capability=smudge")?;
+    write_pkt_text_line(writer, "git-filter-server")?;
+    write_pkt_text_line(writer, "version=2")?;
     write_pkt_flush(writer)?;
     writer
         .flush()
+        .context("failed flushing version negotiation response")?;
+
+    let mut client_capabilities: Vec<String> = hello
+        .iter()
+        .filter(|line| line.starts_with("capability="))
+        .cloned()
+        .collect();
+    let mut pending_headers: Option<Vec<(String, String)>> = None;
+    let mut has_capability_exchange = !client_capabilities.is_empty();
+
+    if client_capabilities.is_empty() {
+        let next_list = read_pkt_kv_or_literal_list(reader)?;
+        if next_list.iter().any(|line| line.starts_with("capability=")) {
+            client_capabilities = next_list;
+            has_capability_exchange = true;
+        } else if !next_list.is_empty() {
+            let mut parsed = Vec::new();
+            for line in next_list {
+                parsed.push(parse_kv(line.as_bytes())?);
+            }
+            pending_headers = Some(parsed);
+        }
+    }
+
+    let supports_clean =
+        client_capabilities.iter().any(|s| s == "capability=clean") || pending_headers.is_some();
+    let supports_smudge =
+        client_capabilities.iter().any(|s| s == "capability=smudge") || pending_headers.is_some();
+
+    if !supports_clean || !supports_smudge {
+        anyhow::bail!("git filter client did not advertise clean+smudge capabilities");
+    }
+
+    if has_capability_exchange {
+        write_pkt_text_line(writer, "capability=clean")?;
+        write_pkt_text_line(writer, "capability=smudge")?;
+        write_pkt_flush(writer)?;
+    }
+    writer
+        .flush()
         .context("failed flushing handshake response")?;
-    Ok(())
+    Ok(pending_headers)
 }
 
 fn read_pkt_kv_or_literal_list(reader: &mut impl Read) -> Result<Vec<String>> {
@@ -642,7 +717,10 @@ fn read_pkt_kv_or_literal_list(reader: &mut impl Read) -> Result<Vec<String>> {
     loop {
         match read_pkt_line(reader)? {
             PktRead::Data(data) => {
-                let text = String::from_utf8(data).context("handshake packet not utf8")?;
+                let text = String::from_utf8(data)
+                    .context("handshake packet not utf8")?
+                    .trim_end_matches('\n')
+                    .to_string();
                 out.push(text);
             }
             PktRead::Flush => return Ok(out),
@@ -669,7 +747,7 @@ fn run_filter_command(
 }
 
 fn write_status_only(writer: &mut impl Write, status: &str) -> Result<()> {
-    write_pkt_line(writer, format!("status={status}").as_bytes())?;
+    write_pkt_text_line(writer, &format!("status={status}"))?;
     write_pkt_flush(writer)?;
     writer
         .flush()
@@ -678,7 +756,7 @@ fn write_status_only(writer: &mut impl Write, status: &str) -> Result<()> {
 }
 
 fn write_filter_success(writer: &mut impl Write, content: &[u8]) -> Result<()> {
-    write_pkt_line(writer, b"status=success")?;
+    write_pkt_text_line(writer, "status=success")?;
     write_pkt_flush(writer)?;
     write_pkt_content(writer, content)?;
     write_pkt_flush(writer)?;
@@ -688,7 +766,7 @@ fn write_filter_success(writer: &mut impl Write, content: &[u8]) -> Result<()> {
 
 fn write_empty_success_list_available_blobs(writer: &mut impl Write) -> Result<()> {
     write_pkt_flush(writer)?;
-    write_pkt_line(writer, b"status=success")?;
+    write_pkt_text_line(writer, "status=success")?;
     write_pkt_flush(writer)?;
     writer
         .flush()

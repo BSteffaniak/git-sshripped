@@ -32,6 +32,12 @@ fn configure_filter_paths(repo: &Path, bin: &str) {
     run_ok(Command::new("git").current_dir(repo).args([
         "config",
         "--local",
+        "filter.git-ssh-crypt.process",
+        &format!("{bin} filter-process"),
+    ]));
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "--local",
         "filter.git-ssh-crypt.clean",
         &format!("{bin} clean --path %f"),
     ]));
