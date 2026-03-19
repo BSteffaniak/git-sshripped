@@ -94,6 +94,67 @@ pub fn private_keys_matching_agent() -> Result<Vec<PathBuf>> {
     Ok(matches)
 }
 
+fn parse_helper_key_output(output: &[u8]) -> Result<Option<Vec<u8>>> {
+    if output.len() == 32 {
+        return Ok(Some(output.to_vec()));
+    }
+
+    let text = String::from_utf8(output.to_vec()).context("agent helper output was not utf8")?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.len() == 64 {
+        let decoded = hex::decode(trimmed).context("agent helper output was invalid hex")?;
+        if decoded.len() == 32 {
+            return Ok(Some(decoded));
+        }
+    }
+
+    anyhow::bail!("agent helper output must be 32 raw bytes or 64-char hex-encoded key")
+}
+
+pub fn unwrap_repo_key_with_agent_helper(
+    wrapped_files: &[PathBuf],
+) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
+    let helper = std::env::var("GSC_SSH_AGENT_HELPER").ok();
+    let Some(helper) = helper else {
+        return Ok(None);
+    };
+
+    for wrapped in wrapped_files {
+        let output = Command::new(&helper)
+            .arg(wrapped)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed running agent helper '{}': {}",
+                    helper,
+                    wrapped.display()
+                )
+            })?;
+
+        if !output.status.success() {
+            continue;
+        }
+
+        let Some(key) = parse_helper_key_output(&output.stdout)? else {
+            continue;
+        };
+
+        return Ok(Some((
+            key,
+            IdentityDescriptor {
+                source: IdentitySource::SshAgent,
+                label: format!("{} ({})", helper, wrapped.display()),
+            },
+        )));
+    }
+
+    Ok(None)
+}
+
 pub fn detect_identity() -> Result<IdentityDescriptor> {
     if std::env::var_os("SSH_AUTH_SOCK").is_some() {
         return Ok(IdentityDescriptor {

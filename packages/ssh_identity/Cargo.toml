@@ -14,6 +14,7 @@ git_ssh_crypt_ssh_identity_models = { workspace = true }
 age = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 dirs = { workspace = true }
+hex = { workspace = true, features = ["std"] }
 
 [features]
 default = []

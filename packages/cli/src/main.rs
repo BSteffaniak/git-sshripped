@@ -31,6 +31,7 @@ use git_ssh_crypt_repository_models::{
 use git_ssh_crypt_ssh_identity::{
     default_private_key_candidates, default_public_key_candidates, detect_identity,
     private_keys_matching_agent, unwrap_repo_key_from_wrapped_files,
+    unwrap_repo_key_with_agent_helper,
 };
 use git_ssh_crypt_worktree::{
     clear_unlock_session, git_common_dir, git_toplevel, read_unlock_session, write_unlock_session,
@@ -549,14 +550,21 @@ fn cmd_unlock(
             );
         }
 
-        let Some((unwrapped, descriptor)) =
-            unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files)?
-        else {
-            anyhow::bail!(
-                "could not decrypt any wrapped key with ssh-agent matched identities or provided/default identity files"
-            );
-        };
-        (unwrapped, descriptor.label)
+        if !no_agent
+            && let Some((unwrapped, descriptor)) =
+                unwrap_repo_key_with_agent_helper(&wrapped_files)?
+        {
+            (unwrapped, format!("agent-helper: {}", descriptor.label))
+        } else {
+            let Some((unwrapped, descriptor)) =
+                unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files)?
+            else {
+                anyhow::bail!(
+                    "could not decrypt any wrapped key with agent helper or provided identity files; set GSC_SSH_AGENT_HELPER for true ssh-agent decrypt, or pass --identity"
+                );
+            };
+            (unwrapped, descriptor.label)
+        }
     };
 
     write_unlock_session(&common_dir, &key, &key_source)?;

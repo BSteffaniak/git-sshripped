@@ -868,6 +868,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "git_ssh_crypt_ssh_identity_models",
+ "hex",
 ]
 
 [[package]]

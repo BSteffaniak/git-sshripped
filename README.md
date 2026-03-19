@@ -48,6 +48,10 @@ git-ssh-crypt lock
 ### Daily use
 
 - `git-ssh-crypt unlock [--identity <path>] [--github-user <user>] [--prefer-agent] [--no-agent]`
+
+`unlock` can use a direct agent helper if `GSC_SSH_AGENT_HELPER` is set.
+The helper is invoked as: `GSC_SSH_AGENT_HELPER <wrapped-key-file>` and must
+print the decrypted 32-byte repo key (raw bytes or 64-char hex) to stdout.
 - `git-ssh-crypt lock`
 - `git-ssh-crypt status`
 - `git-ssh-crypt doctor [--json]`
