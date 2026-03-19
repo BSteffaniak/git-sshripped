@@ -72,7 +72,7 @@ repo key (raw bytes or 64-char hex).
 - `git-sshripped revoke-user --fingerprint <fp> [--auto-reencrypt] [--json]`
 - `git-sshripped revoke-user --github-user <user> [--all-keys-for-user] [--auto-reencrypt] [--json]`
 - `git-sshripped revoke-user --org <org> --team <team> [--auto-reencrypt] [--json]`
-- `git-sshripped add-github-user --username <user> [--no-auto-wrap]`
+- `git-sshripped add-github-user --username <user> [--all] [--no-auto-wrap]`
 - `git-sshripped list-github-users [--verbose]`
 - `git-sshripped remove-github-user --username <user> [--force]`
 - `git-sshripped refresh-github-keys [--username <user>] [--dry-run] [--fail-on-drift] [--json]`
@@ -83,6 +83,10 @@ repo key (raw bytes or 64-char hex).
 - `git-sshripped access-audit [--identity <path>] [--json]`
 
 `add-github-user` and `add-github-team` auto-wrap by default when an unlock session is available. Use `--no-auto-wrap` to skip wrapping.
+
+`add-github-user` filters fetched keys to only those matching a local private key in `~/.ssh/` by default. Pass `--all` to add every key associated with the GitHub account.
+
+`init` can be run without recipients. The repo key is stored in a local session until a recipient is added (e.g. via `add-github-user`).
 
 ### Maintenance
 

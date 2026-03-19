@@ -31,9 +31,9 @@ use git_sshripped_repository_models::{
     RepositoryManifest,
 };
 use git_sshripped_ssh_identity::{
-    default_private_key_candidates, detect_identity, private_keys_matching_agent,
-    unwrap_repo_key_from_wrapped_files, unwrap_repo_key_with_agent_helper,
-    well_known_public_key_paths,
+    default_private_key_candidates, detect_identity, discover_ssh_key_files,
+    private_keys_matching_agent, unwrap_repo_key_from_wrapped_files,
+    unwrap_repo_key_with_agent_helper, well_known_public_key_paths,
 };
 use git_sshripped_worktree::{
     clear_unlock_session, git_common_dir, git_toplevel, read_unlock_session, write_unlock_session,
@@ -161,6 +161,9 @@ enum Command {
         auto_wrap: bool,
         #[arg(long, conflicts_with = "auto_wrap")]
         no_auto_wrap: bool,
+        /// Add all GitHub keys for the user, not just those matching local private keys
+        #[arg(long)]
+        all: bool,
     },
     ListGithubUsers {
         #[arg(long)]
@@ -333,7 +336,8 @@ fn main() -> Result<()> {
             username,
             auto_wrap,
             no_auto_wrap,
-        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap),
+            all,
+        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap, all),
         Command::ListGithubUsers { verbose } => cmd_list_github_users(verbose),
         Command::RemoveGithubUser { username, force } => cmd_remove_github_user(&username, force),
         Command::RefreshGithubKeys {
@@ -1616,7 +1620,7 @@ fn cmd_revoke_user(
     Ok(())
 }
 
-fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
+fn cmd_add_github_user(username: &str, auto_wrap: bool, all: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
@@ -1627,8 +1631,65 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
         .map(|recipient| recipient.fingerprint)
         .collect();
 
-    let recipients =
-        add_recipients_from_github_username_with_options(&repo_root, username, &github_options)?;
+    let fetched = fetch_github_user_keys_with_options(username, &github_options, None)?;
+    let fetched_keys: Vec<&str> = fetched
+        .keys
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(String::as_str)
+        .collect();
+
+    println!(
+        "add-github-user: fetched {} keys for {username}",
+        fetched_keys.len()
+    );
+
+    let keys_to_add: Vec<&str> = if all {
+        fetched_keys.clone()
+    } else {
+        // Discover local public keys and filter fetched keys to only those with a
+        // matching local private key.
+        let local_pub_keys = local_public_key_contents();
+        let matched: Vec<&str> = fetched_keys
+            .iter()
+            .filter(|github_key| {
+                let github_prefix = ssh_key_prefix(github_key);
+                local_pub_keys
+                    .iter()
+                    .any(|local_key| ssh_key_prefix(local_key) == github_prefix)
+            })
+            .copied()
+            .collect();
+
+        let skipped = fetched_keys.len() - matched.len();
+        if matched.is_empty() {
+            anyhow::bail!(
+                "none of {username}'s GitHub keys match a local private key in ~/.ssh/; pass --all to add all keys"
+            );
+        }
+        if skipped > 0 {
+            println!(
+                "add-github-user: matched {} key(s) to local private keys (skipped {skipped})",
+                matched.len()
+            );
+        }
+        matched
+    };
+
+    let mut recipients = Vec::new();
+    for line in &keys_to_add {
+        let recipient = add_recipient_from_public_key(
+            &repo_root,
+            line,
+            RecipientSource::GithubKeys {
+                url: fetched.url.clone(),
+                username: Some(username.to_string()),
+            },
+        )
+        .with_context(|| format!("failed to add recipient from key line '{line}'"))?;
+        recipients.push(recipient);
+    }
+
     enforce_allowed_key_types_for_added_recipients(
         &repo_root,
         &manifest,
@@ -1665,7 +1726,10 @@ fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
     });
     write_github_sources(&repo_root, &registry)?;
 
-    println!("add-github-user: added source for {username}");
+    println!(
+        "add-github-user: added source for {username} ({} recipient(s))",
+        recipients.len()
+    );
     Ok(())
 }
 
@@ -3955,6 +4019,33 @@ fn write_empty_success_list_available_blobs(writer: &mut impl Write) -> Result<(
         .flush()
         .context("failed flushing list_available_blobs response")?;
     Ok(())
+}
+
+/// Returns the "type base64" prefix of an SSH public key line, stripping the comment.
+/// e.g. "ssh-ed25519 AAAA...abc user@host" → "ssh-ed25519 AAAA...abc"
+fn ssh_key_prefix(key_line: &str) -> String {
+    let parts: Vec<&str> = key_line.split_whitespace().collect();
+    if parts.len() >= 2 {
+        format!("{} {}", parts[0], parts[1])
+    } else {
+        key_line.trim().to_string()
+    }
+}
+
+/// Reads all `.pub` files in `~/.ssh/` that have a matching private key file,
+/// returning their contents as strings.
+fn local_public_key_contents() -> Vec<String> {
+    discover_ssh_key_files()
+        .into_iter()
+        .filter_map(|(_private, pub_path)| std::fs::read_to_string(&pub_path).ok())
+        .flat_map(|contents| {
+            contents
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[cfg(test)]
