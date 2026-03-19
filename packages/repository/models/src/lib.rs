@@ -12,6 +12,29 @@ pub struct RepositoryManifest {
     pub strict_mode: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct GithubSourceRegistry {
+    pub users: Vec<GithubUserSource>,
+    pub teams: Vec<GithubTeamSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GithubUserSource {
+    pub username: String,
+    pub url: String,
+    pub fingerprints: Vec<String>,
+    pub last_refreshed_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GithubTeamSource {
+    pub org: String,
+    pub team: String,
+    pub member_usernames: Vec<String>,
+    pub fingerprints: Vec<String>,
+    pub last_refreshed_unix: u64,
+}
+
 impl Default for RepositoryManifest {
     fn default() -> Self {
         Self {

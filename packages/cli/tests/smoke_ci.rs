@@ -115,6 +115,27 @@ fn ci_smoke_init_unlock_doctor_verify() {
             .args(["verify", "--strict"]),
     );
 
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["list-github-users"]),
+    );
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["list-github-teams"]),
+    );
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "refresh-github-keys",
+        "--dry-run",
+        "--json",
+    ]));
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "refresh-github-teams",
+        "--dry-run",
+        "--json",
+    ]));
+
     run_ok(Command::new(bin).current_dir(repo).args(["install"]));
     run_ok(
         Command::new(bin)

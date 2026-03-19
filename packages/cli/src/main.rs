@@ -15,15 +15,19 @@ use git_ssh_crypt_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
 use git_ssh_crypt_filter::{clean, diff, is_protected_path, smudge};
 use git_ssh_crypt_recipient::{
     add_recipient_from_public_key, add_recipients_from_github_keys,
-    add_recipients_from_github_source, add_recipients_from_github_username, list_recipients,
-    remove_recipient_by_fingerprint, remove_recipients_by_fingerprints,
-    wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
+    add_recipients_from_github_source, add_recipients_from_github_username,
+    fetch_github_team_members, list_recipients, remove_recipient_by_fingerprint,
+    remove_recipients_by_fingerprints, wrap_repo_key_for_all_recipients,
+    wrap_repo_key_for_recipient, wrapped_store_dir,
 };
 use git_ssh_crypt_recipient_models::RecipientSource;
 use git_ssh_crypt_repository::{
-    install_git_filters, install_gitattributes, read_manifest, write_manifest,
+    install_git_filters, install_gitattributes, read_github_sources, read_manifest,
+    write_github_sources, write_manifest,
 };
-use git_ssh_crypt_repository_models::RepositoryManifest;
+use git_ssh_crypt_repository_models::{
+    GithubSourceRegistry, GithubTeamSource, GithubUserSource, RepositoryManifest,
+};
 use git_ssh_crypt_ssh_identity::{
     default_private_key_candidates, default_public_key_candidates, detect_identity,
     unwrap_repo_key_from_wrapped_files,
@@ -77,8 +81,14 @@ enum Command {
         github_user: Option<String>,
     },
     Lock,
-    Status,
-    Doctor,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     Rewrap,
     RotateKey {
         #[arg(long = "auto-reencrypt")]
@@ -97,10 +107,60 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
-    RefreshGithubKeys,
+    AddGithubUser {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        auto_wrap: bool,
+    },
+    ListGithubUsers {
+        #[arg(long)]
+        verbose: bool,
+    },
+    RemoveGithubUser {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        force: bool,
+    },
+    RefreshGithubKeys {
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    AddGithubTeam {
+        #[arg(long)]
+        org: String,
+        #[arg(long)]
+        team: String,
+        #[arg(long)]
+        auto_wrap: bool,
+    },
+    ListGithubTeams,
+    RemoveGithubTeam {
+        #[arg(long)]
+        org: String,
+        #[arg(long)]
+        team: String,
+    },
+    RefreshGithubTeams {
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     AccessAudit {
         #[arg(long = "identity")]
         identities: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
     RemoveUser {
         #[arg(long)]
@@ -121,6 +181,8 @@ enum Command {
     Verify {
         #[arg(long)]
         strict: bool,
+        #[arg(long)]
+        json: bool,
     },
     Clean {
         #[arg(long)]
@@ -160,8 +222,8 @@ fn main() -> Result<()> {
             github_user,
         } => cmd_unlock(key_hex, identities, github_user),
         Command::Lock => cmd_lock(),
-        Command::Status => cmd_status(),
-        Command::Doctor => cmd_doctor(),
+        Command::Status { json } => cmd_status(json),
+        Command::Doctor { json } => cmd_doctor(json),
         Command::Rewrap => cmd_rewrap(),
         Command::RotateKey { auto_reencrypt } => cmd_rotate_key(auto_reencrypt),
         Command::Reencrypt => cmd_reencrypt(),
@@ -171,14 +233,37 @@ fn main() -> Result<()> {
             github_user,
         } => cmd_add_user(key, github_keys_url, github_user),
         Command::ListUsers { verbose } => cmd_list_users(verbose),
-        Command::RefreshGithubKeys => cmd_refresh_github_keys(),
-        Command::AccessAudit { identities } => cmd_access_audit(identities),
+        Command::AddGithubUser {
+            username,
+            auto_wrap,
+        } => cmd_add_github_user(&username, auto_wrap),
+        Command::ListGithubUsers { verbose } => cmd_list_github_users(verbose),
+        Command::RemoveGithubUser { username, force } => cmd_remove_github_user(&username, force),
+        Command::RefreshGithubKeys {
+            username,
+            dry_run,
+            json,
+        } => cmd_refresh_github_keys(username, dry_run, json),
+        Command::AddGithubTeam {
+            org,
+            team,
+            auto_wrap,
+        } => cmd_add_github_team(&org, &team, auto_wrap),
+        Command::ListGithubTeams => cmd_list_github_teams(),
+        Command::RemoveGithubTeam { org, team } => cmd_remove_github_team(&org, &team),
+        Command::RefreshGithubTeams {
+            org,
+            team,
+            dry_run,
+            json,
+        } => cmd_refresh_github_teams(org, team, dry_run, json),
+        Command::AccessAudit { identities, json } => cmd_access_audit(identities, json),
         Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
         Command::Install => cmd_install(),
         Command::MigrateFromGitCrypt => cmd_migrate_from_git_crypt(),
         Command::ExportRepoKey { out } => cmd_export_repo_key(&out),
         Command::ImportRepoKey { input } => cmd_import_repo_key(&input),
-        Command::Verify { strict } => cmd_verify(strict),
+        Command::Verify { strict, json } => cmd_verify(strict, json),
         Command::Clean { path } => cmd_clean(&path),
         Command::Smudge { path } => cmd_smudge(&path),
         Command::Diff { path } => cmd_diff(&path),
@@ -258,6 +343,35 @@ fn restore_wrapped_files(
     }
 
     Ok(())
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn fingerprint_in_other_sources(
+    registry: &GithubSourceRegistry,
+    fingerprint: &str,
+    skip_user: Option<&str>,
+    skip_team: Option<(&str, &str)>,
+) -> bool {
+    let in_users = registry.users.iter().any(|source| {
+        if skip_user.is_some_and(|u| u == source.username) {
+            return false;
+        }
+        source.fingerprints.iter().any(|f| f == fingerprint)
+    });
+    if in_users {
+        return true;
+    }
+    registry.teams.iter().any(|source| {
+        if skip_team.is_some_and(|(org, team)| org == source.org && team == source.team) {
+            return false;
+        }
+        source.fingerprints.iter().any(|f| f == fingerprint)
+    })
 }
 
 fn cmd_init(
@@ -413,7 +527,7 @@ fn cmd_lock() -> Result<()> {
     Ok(())
 }
 
-fn cmd_status() -> Result<()> {
+fn cmd_status(json: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let manifest = read_manifest(&repo_root)?;
@@ -421,6 +535,23 @@ fn cmd_status() -> Result<()> {
     let session = read_unlock_session(&common_dir)?;
     let recipients = list_recipients(&repo_root)?;
     let wrapped_files = wrapped_key_files(&repo_root)?;
+
+    if json {
+        let payload = serde_json::json!({
+            "repo": repo_root.display().to_string(),
+            "common_dir": common_dir.display().to_string(),
+            "state": if session.is_some() { "UNLOCKED" } else { "LOCKED" },
+            "algorithm": format!("{:?}", manifest.encryption_algorithm),
+            "strict_mode": manifest.strict_mode,
+            "identity": {"label": identity.label, "source": format!("{:?}", identity.source)},
+            "recipients": recipients.len(),
+            "wrapped_keys": wrapped_files.len(),
+            "unlock_source": session.as_ref().map(|s| s.key_source.clone()),
+            "protected_patterns": manifest.protected_patterns,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
 
     println!("repo: {}", repo_root.display());
     println!(
@@ -571,82 +702,365 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_refresh_github_keys() -> Result<()> {
+fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
-    let recipients = list_recipients(&repo_root)?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let session_key = repo_key_from_session()?;
 
-    let mut sources = Vec::new();
-    for recipient in &recipients {
-        if let RecipientSource::GithubKeys { url, username } = &recipient.source {
-            sources.push((url.clone(), username.clone()));
+    let recipients = add_recipients_from_github_username(&repo_root, username)?;
+    let fingerprints: Vec<String> = recipients
+        .iter()
+        .map(|recipient| recipient.fingerprint.clone())
+        .collect();
+
+    if auto_wrap && let Some(key) = session_key.as_deref() {
+        for recipient in &recipients {
+            wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
         }
     }
-    sources.sort();
-    sources.dedup();
 
-    if sources.is_empty() {
-        println!("refresh-github-keys: no GitHub-backed recipients configured");
+    registry.users.retain(|source| source.username != username);
+    registry.users.push(GithubUserSource {
+        username: username.to_string(),
+        url: format!("https://github.com/{username}.keys"),
+        fingerprints,
+        last_refreshed_unix: now_unix(),
+    });
+    write_github_sources(&repo_root, &registry)?;
+
+    println!("add-github-user: added source for {username}");
+    Ok(())
+}
+
+fn cmd_list_github_users(verbose: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let registry = read_github_sources(&repo_root)?;
+    if registry.users.is_empty() {
+        println!("no github user sources configured");
+        return Ok(());
+    }
+    for source in registry.users {
+        if verbose {
+            println!(
+                "username={} url={} fingerprints={} refreshed={}",
+                source.username,
+                source.url,
+                source.fingerprints.len(),
+                source.last_refreshed_unix
+            );
+        } else {
+            println!("{}", source.username);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let Some(source) = registry
+        .users
+        .iter()
+        .find(|source| source.username == username)
+        .cloned()
+    else {
+        anyhow::bail!("github user source not found: {username}");
+    };
+
+    let recipients = list_recipients(&repo_root)?;
+    if recipients.len() <= 1 && !force {
+        anyhow::bail!("refusing to remove final recipient/source without --force");
+    }
+
+    for fingerprint in &source.fingerprints {
+        if !fingerprint_in_other_sources(&registry, fingerprint, Some(username), None) {
+            let _ = remove_recipient_by_fingerprint(&repo_root, fingerprint)?;
+        }
+    }
+
+    registry.users.retain(|entry| entry.username != username);
+    write_github_sources(&repo_root, &registry)?;
+    println!("remove-github-user: removed source for {username}");
+    Ok(())
+}
+
+fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let session_key = repo_key_from_session()?;
+    let (members, _) = fetch_github_team_members(org, team)?;
+
+    let mut fingerprints = std::collections::BTreeSet::new();
+    for member in &members {
+        let recipients = add_recipients_from_github_username(&repo_root, member)?;
+        if auto_wrap && let Some(key) = session_key.as_deref() {
+            for recipient in &recipients {
+                wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+            }
+        }
+        for recipient in recipients {
+            fingerprints.insert(recipient.fingerprint);
+        }
+    }
+
+    registry
+        .teams
+        .retain(|source| !(source.org == org && source.team == team));
+    registry.teams.push(GithubTeamSource {
+        org: org.to_string(),
+        team: team.to_string(),
+        member_usernames: members,
+        fingerprints: fingerprints.into_iter().collect(),
+        last_refreshed_unix: now_unix(),
+    });
+    write_github_sources(&repo_root, &registry)?;
+    println!("add-github-team: added source for {org}/{team}");
+    Ok(())
+}
+
+fn cmd_list_github_teams() -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let registry = read_github_sources(&repo_root)?;
+    if registry.teams.is_empty() {
+        println!("no github team sources configured");
+        return Ok(());
+    }
+    for source in registry.teams {
+        println!(
+            "{}/{} members={} fingerprints={} refreshed={}",
+            source.org,
+            source.team,
+            source.member_usernames.len(),
+            source.fingerprints.len(),
+            source.last_refreshed_unix
+        );
+    }
+    Ok(())
+}
+
+fn cmd_remove_github_team(org: &str, team: &str) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let Some(source) = registry
+        .teams
+        .iter()
+        .find(|source| source.org == org && source.team == team)
+        .cloned()
+    else {
+        anyhow::bail!("github team source not found: {org}/{team}");
+    };
+
+    for fingerprint in &source.fingerprints {
+        if !fingerprint_in_other_sources(&registry, fingerprint, None, Some((org, team))) {
+            let _ = remove_recipient_by_fingerprint(&repo_root, fingerprint)?;
+        }
+    }
+
+    registry
+        .teams
+        .retain(|entry| !(entry.org == org && entry.team == team));
+    write_github_sources(&repo_root, &registry)?;
+    println!("remove-github-team: removed source for {org}/{team}");
+    Ok(())
+}
+
+fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let mut targets: Vec<_> = registry.users.clone();
+    if let Some(user) = username.as_deref() {
+        targets.retain(|source| source.username == user);
+    }
+
+    if targets.is_empty() {
+        println!("refresh-github-keys: no matching GitHub user sources configured");
         return Ok(());
     }
 
     let session_key = repo_key_from_session()?;
-    let mut total_added = 0usize;
-    let mut total_removed = 0usize;
+    let mut events = Vec::new();
 
-    for (url, username) in sources {
-        let before = list_recipients(&repo_root)?;
-        let before_set: std::collections::HashSet<String> = before
-            .iter()
-            .filter_map(|recipient| {
-                if let RecipientSource::GithubKeys {
-                    url: r_url,
-                    username: r_user,
-                } = &recipient.source
-                    && *r_url == url
-                    && *r_user == username
-                {
-                    Some(recipient.fingerprint.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let fetched = add_recipients_from_github_source(&repo_root, &url, username.clone())?;
+    for source in targets {
+        let before_set: std::collections::HashSet<String> =
+            source.fingerprints.iter().cloned().collect();
+        let fetched = add_recipients_from_github_source(
+            &repo_root,
+            &source.url,
+            Some(source.username.clone()),
+        )?;
         let after_set: std::collections::HashSet<String> = fetched
             .iter()
             .map(|recipient| recipient.fingerprint.clone())
             .collect();
 
-        let mut removed = Vec::new();
-        for fingerprint in before_set.difference(&after_set) {
-            removed.push(fingerprint.clone());
-        }
-        total_removed += remove_recipients_by_fingerprints(&repo_root, &removed)?;
+        let added: Vec<String> = after_set.difference(&before_set).cloned().collect();
+        let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
+        let unchanged = before_set.intersection(&after_set).count();
 
-        if let Some(key) = session_key.as_deref() {
-            for recipient in &fetched {
-                wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+        if !dry_run {
+            let mut safe_remove = Vec::new();
+            for fingerprint in &removed {
+                if !fingerprint_in_other_sources(
+                    &registry,
+                    fingerprint,
+                    Some(&source.username),
+                    None,
+                ) {
+                    safe_remove.push(fingerprint.clone());
+                }
+            }
+            let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
+
+            if let Some(key) = session_key.as_deref() {
+                for recipient in &fetched {
+                    wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+                }
+            }
+
+            if let Some(entry) = registry
+                .users
+                .iter_mut()
+                .find(|entry| entry.username == source.username)
+            {
+                entry.fingerprints = after_set.iter().cloned().collect();
+                entry.last_refreshed_unix = now_unix();
             }
         }
 
-        total_added += fetched.len();
-        println!(
-            "refresh-github-keys: source={} fetched={} removed={}",
-            url,
-            fetched.len(),
-            removed.len()
-        );
+        events.push(serde_json::json!({
+            "username": source.username,
+            "added": added,
+            "removed": removed,
+            "unchanged": unchanged,
+            "dry_run": dry_run,
+        }));
     }
 
-    println!(
-        "refresh-github-keys: complete added_or_refreshed={} removed={}",
-        total_added, total_removed
-    );
+    if !dry_run {
+        write_github_sources(&repo_root, &registry)?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"events": events}))?
+        );
+    } else {
+        for event in events {
+            println!("refresh-github-keys: {}", event);
+        }
+    }
+
     Ok(())
 }
 
-fn cmd_access_audit(identities: Vec<String>) -> Result<()> {
+fn cmd_refresh_github_teams(
+    org: Option<String>,
+    team: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let mut registry = read_github_sources(&repo_root)?;
+    let mut targets = registry.teams.clone();
+    if let Some(org) = org.as_deref() {
+        targets.retain(|source| source.org == org);
+    }
+    if let Some(team) = team.as_deref() {
+        targets.retain(|source| source.team == team);
+    }
+    if targets.is_empty() {
+        println!("refresh-github-teams: no matching team sources configured");
+        return Ok(());
+    }
+
+    let session_key = repo_key_from_session()?;
+    let mut events = Vec::new();
+
+    for source in targets {
+        let (members, _) = fetch_github_team_members(&source.org, &source.team)?;
+        let mut fetched_fingerprints = std::collections::HashSet::new();
+
+        for member in &members {
+            let imported = add_recipients_from_github_username(&repo_root, member)?;
+            if let Some(key) = session_key.as_deref()
+                && !dry_run
+            {
+                for recipient in &imported {
+                    wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+                }
+            }
+            for recipient in imported {
+                fetched_fingerprints.insert(recipient.fingerprint);
+            }
+        }
+
+        let before_set: std::collections::HashSet<String> =
+            source.fingerprints.iter().cloned().collect();
+        let added: Vec<String> = fetched_fingerprints
+            .difference(&before_set)
+            .cloned()
+            .collect();
+        let removed: Vec<String> = before_set
+            .difference(&fetched_fingerprints)
+            .cloned()
+            .collect();
+        let unchanged = before_set.intersection(&fetched_fingerprints).count();
+
+        if !dry_run {
+            let mut safe_remove = Vec::new();
+            for fingerprint in &removed {
+                if !fingerprint_in_other_sources(
+                    &registry,
+                    fingerprint,
+                    None,
+                    Some((&source.org, &source.team)),
+                ) {
+                    safe_remove.push(fingerprint.clone());
+                }
+            }
+            let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
+
+            if let Some(entry) = registry
+                .teams
+                .iter_mut()
+                .find(|entry| entry.org == source.org && entry.team == source.team)
+            {
+                entry.member_usernames = members;
+                entry.fingerprints = fetched_fingerprints.iter().cloned().collect();
+                entry.last_refreshed_unix = now_unix();
+            }
+        }
+
+        events.push(serde_json::json!({
+            "org": source.org,
+            "team": source.team,
+            "added": added,
+            "removed": removed,
+            "unchanged": unchanged,
+            "dry_run": dry_run,
+        }));
+    }
+
+    if !dry_run {
+        write_github_sources(&repo_root, &registry)?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"events": events}))?
+        );
+    } else {
+        for event in events {
+            println!("refresh-github-teams: {}", event);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_access_audit(identities: Vec<String>, json: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let recipients = list_recipients(&repo_root)?;
     let identities = if identities.is_empty() {
@@ -656,19 +1070,36 @@ fn cmd_access_audit(identities: Vec<String>) -> Result<()> {
     };
 
     let mut accessible = 0usize;
+    let mut rows = Vec::new();
     for recipient in recipients {
         let wrapped = wrapped_store_dir(&repo_root).join(format!("{}.age", recipient.fingerprint));
         let can = unwrap_repo_key_from_wrapped_files(&[wrapped], &identities)?.is_some();
         if can {
             accessible += 1;
         }
-        println!(
-            "{} key_type={} accessible={} source={:?}",
-            recipient.fingerprint, recipient.key_type, can, recipient.source
-        );
+        rows.push(serde_json::json!({
+            "fingerprint": recipient.fingerprint,
+            "key_type": recipient.key_type,
+            "source": format!("{:?}", recipient.source),
+            "accessible": can,
+        }));
     }
 
-    println!("access-audit: accessible recipients={accessible}");
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "accessible": accessible,
+                "rows": rows,
+            }))?
+        );
+    } else {
+        for row in &rows {
+            println!("{}", row);
+        }
+        println!("access-audit: accessible recipients={accessible}");
+    }
+
     Ok(())
 }
 
@@ -828,7 +1259,7 @@ fn protected_tracked_files(
     Ok(protected)
 }
 
-fn cmd_verify(strict: bool) -> Result<()> {
+fn cmd_verify(strict: bool, json: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
     let strict = strict || manifest.strict_mode;
@@ -843,12 +1274,20 @@ fn cmd_verify(strict: bool) -> Result<()> {
         }
     }
 
-    if failures.is_empty() {
-        println!("verify: OK");
-    } else {
-        println!("verify: FAIL ({})", failures.len());
-        for file in &failures {
-            eprintln!("- plaintext protected file in index: {file}");
+    if !failures.is_empty() {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": false,
+                    "failures": failures,
+                }))?
+            );
+        } else {
+            println!("verify: FAIL ({})", failures.len());
+            for file in &failures {
+                eprintln!("- plaintext protected file in index: {file}");
+            }
         }
         anyhow::bail!("verify failed");
     }
@@ -861,6 +1300,15 @@ fn cmd_verify(strict: bool) -> Result<()> {
                 "strict verify failed: filter.git-ssh-crypt.process and required=true must be configured"
             );
         }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"ok": true}))?
+        );
+    } else {
+        println!("verify: OK");
     }
 
     Ok(())
@@ -1023,21 +1471,27 @@ fn git_local_config(repo_root: &std::path::Path, key: &str) -> Result<Option<Str
     Ok(Some(value))
 }
 
-fn cmd_doctor() -> Result<()> {
+fn cmd_doctor(json: bool) -> Result<()> {
     let mut failures = Vec::new();
 
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
-    println!("doctor: repo root {}", repo_root.display());
-    println!("doctor: common dir {}", common_dir.display());
+    if !json {
+        println!("doctor: repo root {}", repo_root.display());
+        println!("doctor: common dir {}", common_dir.display());
+    }
 
     let manifest = match read_manifest(&repo_root) {
         Ok(manifest) => {
-            println!("check manifest: PASS");
+            if !json {
+                println!("check manifest: PASS");
+            }
             manifest
         }
         Err(err) => {
-            println!("check manifest: FAIL");
+            if !json {
+                println!("check manifest: FAIL");
+            }
             failures.push(format!("manifest unreadable: {err:#}"));
             RepositoryManifest::default()
         }
@@ -1048,41 +1502,59 @@ fn cmd_doctor() -> Result<()> {
         .as_ref()
         .is_some_and(|value| value.contains("filter-process"))
     {
-        println!("check filter.process: PASS");
+        if !json {
+            println!("check filter.process: PASS");
+        }
     } else {
-        println!("check filter.process: FAIL");
+        if !json {
+            println!("check filter.process: FAIL");
+        }
         failures.push("filter.git-ssh-crypt.process is missing or invalid".to_string());
     }
 
     let required_cfg = git_local_config(&repo_root, "filter.git-ssh-crypt.required")?;
     if required_cfg.as_deref() == Some("true") {
-        println!("check filter.required: PASS");
+        if !json {
+            println!("check filter.required: PASS");
+        }
     } else {
-        println!("check filter.required: FAIL");
+        if !json {
+            println!("check filter.required: FAIL");
+        }
         failures.push("filter.git-ssh-crypt.required should be true".to_string());
     }
 
     let gitattributes = repo_root.join(".gitattributes");
     match fs::read_to_string(&gitattributes) {
         Ok(text) if text.contains("filter=git-ssh-crypt") => {
-            println!("check gitattributes wiring: PASS");
+            if !json {
+                println!("check gitattributes wiring: PASS");
+            }
         }
         Ok(_) => {
-            println!("check gitattributes wiring: FAIL");
+            if !json {
+                println!("check gitattributes wiring: FAIL");
+            }
             failures.push(".gitattributes has no filter=git-ssh-crypt entries".to_string());
         }
         Err(err) => {
-            println!("check gitattributes wiring: FAIL");
+            if !json {
+                println!("check gitattributes wiring: FAIL");
+            }
             failures.push(format!("cannot read {}: {err}", gitattributes.display()));
         }
     }
 
     let recipients = list_recipients(&repo_root)?;
     if recipients.is_empty() {
-        println!("check recipients: FAIL");
+        if !json {
+            println!("check recipients: FAIL");
+        }
         failures.push("no recipients configured".to_string());
     } else {
-        println!("check recipients: PASS ({})", recipients.len());
+        if !json {
+            println!("check recipients: PASS ({})", recipients.len());
+        }
         for recipient in &recipients {
             if recipient.key_type != "ssh-ed25519" && recipient.key_type != "ssh-rsa" {
                 failures.push(format!(
@@ -1095,10 +1567,14 @@ fn cmd_doctor() -> Result<()> {
 
     let wrapped_files = wrapped_key_files(&repo_root)?;
     if wrapped_files.is_empty() {
-        println!("check wrapped keys: FAIL");
+        if !json {
+            println!("check wrapped keys: FAIL");
+        }
         failures.push("no wrapped keys found".to_string());
     } else {
-        println!("check wrapped keys: PASS ({})", wrapped_files.len());
+        if !json {
+            println!("check wrapped keys: PASS ({})", wrapped_files.len());
+        }
     }
 
     for recipient in &recipients {
@@ -1117,33 +1593,58 @@ fn cmd_doctor() -> Result<()> {
             .decode(session.key_b64)
             .context("unlock session key is invalid base64")?;
         if decoded.len() == 32 {
-            println!("check unlock session: PASS (UNLOCKED)");
+            if !json {
+                println!("check unlock session: PASS (UNLOCKED)");
+            }
         } else {
-            println!("check unlock session: FAIL");
+            if !json {
+                println!("check unlock session: FAIL");
+            }
             failures.push(format!(
                 "unlock session key length is {}, expected 32",
                 decoded.len()
             ));
         }
     } else {
-        println!("check unlock session: PASS (LOCKED)");
+        if !json {
+            println!("check unlock session: PASS (LOCKED)");
+        }
     }
 
-    println!("doctor: algorithm {:?}", manifest.encryption_algorithm);
-    println!("doctor: strict_mode {}", manifest.strict_mode);
-    println!(
-        "doctor: protected patterns {}",
-        manifest.protected_patterns.join(", ")
-    );
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": failures.is_empty(),
+                "repo": repo_root.display().to_string(),
+                "common_dir": common_dir.display().to_string(),
+                "algorithm": format!("{:?}", manifest.encryption_algorithm),
+                "strict_mode": manifest.strict_mode,
+                "protected_patterns": manifest.protected_patterns,
+                "failures": failures,
+            }))?
+        );
+    } else {
+        println!("doctor: algorithm {:?}", manifest.encryption_algorithm);
+        println!("doctor: strict_mode {}", manifest.strict_mode);
+        println!(
+            "doctor: protected patterns {}",
+            manifest.protected_patterns.join(", ")
+        );
+    }
 
     if failures.is_empty() {
-        println!("doctor: OK");
+        if !json {
+            println!("doctor: OK");
+        }
         return Ok(());
     }
 
-    println!("doctor: {} issue(s) found", failures.len());
-    for failure in failures {
-        eprintln!("- {failure}");
+    if !json {
+        println!("doctor: {} issue(s) found", failures.len());
+        for failure in failures {
+            eprintln!("- {failure}");
+        }
     }
 
     anyhow::bail!("doctor checks failed")
