@@ -6,7 +6,6 @@ use git_ssh_crypt_encryption_models::EncryptionAlgorithm;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InitOptions {
-    pub protected_patterns: Vec<String>,
     pub algorithm: EncryptionAlgorithm,
     pub strict_mode: bool,
 }
@@ -14,7 +13,6 @@ pub struct InitOptions {
 impl Default for InitOptions {
     fn default() -> Self {
         Self {
-            protected_patterns: vec![],
             algorithm: EncryptionAlgorithm::AesSivV1,
             strict_mode: false,
         }

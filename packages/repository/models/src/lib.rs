@@ -9,7 +9,6 @@ use git_ssh_crypt_encryption_models::EncryptionAlgorithm;
 pub struct RepositoryManifest {
     pub manifest_version: u32,
     pub encryption_algorithm: EncryptionAlgorithm,
-    pub protected_patterns: Vec<String>,
     pub strict_mode: bool,
     pub repo_key_id: Option<String>,
     pub min_recipients: usize,
@@ -63,7 +62,6 @@ impl Default for RepositoryManifest {
         Self {
             manifest_version: 1,
             encryption_algorithm: EncryptionAlgorithm::AesSivV1,
-            protected_patterns: vec![],
             strict_mode: false,
             repo_key_id: None,
             min_recipients: 1,

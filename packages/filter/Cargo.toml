@@ -11,10 +11,9 @@ version = { workspace = true }
 
 [dependencies]
 git_ssh_crypt_encryption = { workspace = true }
+git_ssh_crypt_encryption_models = { workspace = true }
 git_ssh_crypt_filter_models = { workspace = true }
-git_ssh_crypt_repository_models = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
-globset = { workspace = true }
 
 [features]
 default = []

@@ -12,7 +12,7 @@ use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use git_ssh_crypt_cli_models::InitOptions;
 use git_ssh_crypt_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
-use git_ssh_crypt_filter::{clean, diff, is_protected_path, smudge};
+use git_ssh_crypt_filter::{clean, diff, smudge};
 use git_ssh_crypt_recipient::{
     GithubAuthMode, GithubFetchOptions, add_recipient_from_public_key,
     add_recipients_from_github_source_with_options,
@@ -572,7 +572,7 @@ fn enforce_verify_clean_for_sensitive_actions(
     if !manifest.require_verify_strict_clean_for_rotate_revoke {
         return Ok(());
     }
-    let failures = verify_failures_with_manifest(repo_root, manifest)?;
+    let failures = verify_failures(repo_root)?;
     if failures.is_empty() {
         return Ok(());
     }
@@ -907,7 +907,6 @@ fn cmd_init(
     let github_options = github_fetch_options(&repo_root)?;
 
     let init = InitOptions {
-        protected_patterns: patterns,
         algorithm: algorithm.into(),
         strict_mode: strict,
     };
@@ -915,13 +914,12 @@ fn cmd_init(
     let manifest = RepositoryManifest {
         manifest_version: 1,
         encryption_algorithm: init.algorithm,
-        protected_patterns: init.protected_patterns,
         strict_mode: init.strict_mode,
         ..RepositoryManifest::default()
     };
 
     write_manifest(&repo_root, &manifest)?;
-    install_gitattributes(&repo_root, &manifest.protected_patterns)?;
+    install_gitattributes(&repo_root, &patterns)?;
     install_git_filters(&repo_root)?;
 
     let mut added_recipients = Vec::new();
@@ -976,7 +974,7 @@ fn cmd_init(
     println!("initialized git-ssh-crypt in {}", repo_root.display());
     println!("algorithm: {:?}", manifest.encryption_algorithm);
     println!("strict_mode: {}", manifest.strict_mode);
-    println!("patterns: {}", manifest.protected_patterns.join(", "));
+    println!("patterns: {}", patterns.join(", "));
     println!("recipients: {}", recipients.len());
     println!("wrapped keys written: {}", wrapped.len());
     if added_recipients.is_empty() {
@@ -1108,8 +1106,7 @@ fn cmd_lock(force: bool, no_scrub: bool) -> Result<()> {
     let protected = if no_scrub {
         Vec::new()
     } else {
-        let manifest = read_manifest(&repo_root)?;
-        let protected = protected_tracked_files(&repo_root, &manifest)?;
+        let protected = protected_tracked_files(&repo_root)?;
         let dirty = protected_dirty_paths(&repo_root, &protected)?;
         if !dirty.is_empty() && !force {
             let preview = dirty.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
@@ -1161,8 +1158,8 @@ fn cmd_status(json: bool) -> Result<()> {
     let recipients = list_recipients(&repo_root)?;
     let wrapped_files = wrapped_key_files(&repo_root)?;
     let helper = resolve_agent_helper(&repo_root)?;
-    let protected_count = protected_tracked_files(&repo_root, &manifest)?.len();
-    let drift_count = verify_failures_with_manifest(&repo_root, &manifest)?.len();
+    let protected_count = protected_tracked_files(&repo_root)?.len();
+    let drift_count = verify_failures(&repo_root)?.len();
     let session_matches_manifest = if let Some(s) = session.as_ref() {
         if let Some(expected) = manifest.repo_key_id.as_ref() {
             s.repo_key_id.as_deref() == Some(expected.as_str())
@@ -1196,7 +1193,7 @@ fn cmd_status(json: bool) -> Result<()> {
             "session_matches_manifest": session_matches_manifest,
             "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
             "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
-            "protected_patterns": manifest.protected_patterns,
+                "protected_patterns": read_gitattributes_patterns(&repo_root),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -1258,7 +1255,7 @@ fn cmd_status(json: bool) -> Result<()> {
     }
     println!(
         "protected patterns: {}",
-        manifest.protected_patterns.join(", ")
+        read_gitattributes_patterns(&repo_root).join(", ")
     );
     Ok(())
 }
@@ -1516,9 +1513,8 @@ fn cmd_revoke_user(
 
     let mut refreshed = 0usize;
     if auto_reencrypt {
-        refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
+        refreshed = reencrypt_with_current_session(&repo_root)?;
     }
-
     if json {
         println!(
             "{}",
@@ -2279,10 +2275,9 @@ fn cmd_access_audit(identities: Vec<String>, json: bool) -> Result<()> {
 
 fn cmd_install() -> Result<()> {
     let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
-    install_gitattributes(&repo_root, &manifest.protected_patterns)?;
+    let _manifest = read_manifest(&repo_root)?;
     install_git_filters(&repo_root)?;
-    println!("install: refreshed gitattributes and git filter configuration");
+    println!("install: refreshed git filter configuration");
     Ok(())
 }
 
@@ -2591,49 +2586,50 @@ fn cmd_migrate_from_git_crypt(
     }
 
     let mut manifest_before = read_manifest(&repo_root).unwrap_or_default();
-    let old_patterns = manifest_before.protected_patterns.clone();
-    manifest_before.protected_patterns = plan.patterns.clone();
     if let Some(key) = repo_key_from_session().ok().flatten() {
         manifest_before.repo_key_id = Some(repo_key_id_from_bytes(&key));
     }
     let manifest_after = manifest_before;
 
-    let imported_patterns = manifest_after.protected_patterns.len();
-    let changed_patterns = old_patterns != manifest_after.protected_patterns;
+    let imported_patterns = plan.patterns.len();
+    let changed_patterns = true;
 
     if !dry_run {
         fs::write(&path, &plan.rewritten_text)
             .with_context(|| format!("failed to rewrite {}", path.display()))?;
         write_manifest(&repo_root, &manifest_after)?;
-        install_gitattributes(&repo_root, &manifest_after.protected_patterns)?;
+        install_gitattributes(
+            &repo_root,
+            &plan.patterns.iter().cloned().collect::<Vec<_>>(),
+        )?;
         install_git_filters(&repo_root)?;
     }
 
     let mut reencrypted_files = 0usize;
     if reencrypt {
         if dry_run {
-            reencrypted_files = protected_tracked_files(&repo_root, &manifest_after)?.len();
+            reencrypted_files = protected_tracked_files(&repo_root)?.len();
         } else {
-            reencrypted_files = reencrypt_with_current_session(&repo_root, &manifest_after)?;
+            reencrypted_files = reencrypt_with_current_session(&repo_root)?;
         }
     }
 
-    let mut verify_failures = Vec::new();
+    let mut verify_failures_list = Vec::new();
     if verify {
-        verify_failures = verify_failures_with_manifest(&repo_root, &manifest_after)?;
-        if !verify_failures.is_empty() && !dry_run {
+        verify_failures_list = verify_failures(&repo_root)?;
+        if !verify_failures_list.is_empty() && !dry_run {
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "ok": false,
                         "dry_run": dry_run,
-                        "verify_failures": verify_failures,
+                        "verify_failures": verify_failures_list,
                     }))?
                 );
             } else {
                 println!("migrate-from-git-crypt: verify failed");
-                for failure in &verify_failures {
+                for failure in &verify_failures_list {
                     eprintln!("- {failure}");
                 }
             }
@@ -2661,8 +2657,8 @@ fn cmd_migrate_from_git_crypt(
         "reencrypt_requested": reencrypt,
         "reencrypted_files": reencrypted_files,
         "verify_requested": verify,
-        "verify_failures": if dry_run { vec![] } else { verify_failures.clone() },
-        "files_requiring_reencrypt": if dry_run { verify_failures.clone() } else { vec![] },
+        "verify_failures": if dry_run { vec![] } else { verify_failures_list.clone() },
+        "files_requiring_reencrypt": if dry_run { verify_failures_list.clone() } else { vec![] },
     });
 
     if let Some(path) = write_report {
@@ -2863,25 +2859,75 @@ fn scrub_protected_paths(repo_root: &std::path::Path, protected: &[String]) -> R
     Ok(())
 }
 
-fn protected_tracked_files(
-    repo_root: &std::path::Path,
-    manifest: &RepositoryManifest,
-) -> Result<Vec<String>> {
-    let files = git_ls_files(repo_root)?;
-    let mut protected = Vec::new();
-    for path in files {
-        if is_protected_path(manifest, &path)? {
-            protected.push(path);
+fn read_gitattributes_patterns(repo_root: &std::path::Path) -> Vec<String> {
+    let path = repo_root.join(".gitattributes");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut patterns = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("filter=git-ssh-crypt") {
+            if let Some(pattern) = trimmed.split_whitespace().next() {
+                patterns.push(pattern.to_string());
+            }
+        } else if trimmed.contains("!filter") || trimmed.contains("!diff") {
+            if let Some(pattern) = trimmed.split_whitespace().next() {
+                patterns.push(format!("!{pattern}"));
+            }
         }
     }
+    patterns
+}
+
+fn protected_tracked_files(repo_root: &std::path::Path) -> Result<Vec<String>> {
+    let files = git_ls_files(repo_root)?;
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut child = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["check-attr", "-z", "--stdin", "filter"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git check-attr")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open check-attr stdin")?;
+        for path in &files {
+            std::io::Write::write_all(stdin, path.as_bytes())?;
+            std::io::Write::write_all(stdin, b"\0")?;
+        }
+    }
+
+    let output = child.wait_with_output().context("git check-attr failed")?;
+    if !output.status.success() {
+        anyhow::bail!("git check-attr exited non-zero");
+    }
+
+    let mut protected = Vec::new();
+    let fields: Vec<&[u8]> = output.stdout.split(|b| *b == 0).collect();
+    let mut i = 0;
+    while i + 2 < fields.len() {
+        let path = std::str::from_utf8(fields[i]).context("non-utf8 path from check-attr")?;
+        let value =
+            std::str::from_utf8(fields[i + 2]).context("non-utf8 attr value from check-attr")?;
+        if value == "git-ssh-crypt" {
+            protected.push(path.to_string());
+        }
+        i += 3;
+    }
+
     Ok(protected)
 }
 
-fn verify_failures_with_manifest(
-    repo_root: &std::path::Path,
-    manifest: &RepositoryManifest,
-) -> Result<Vec<String>> {
-    let files = protected_tracked_files(repo_root, manifest)?;
+fn verify_failures(repo_root: &std::path::Path) -> Result<Vec<String>> {
+    let files = protected_tracked_files(repo_root)?;
     let mut failures = Vec::new();
     for path in files {
         let blob = git_show_index_path(repo_root, &path)?;
@@ -2897,7 +2943,7 @@ fn cmd_verify(strict: bool, json: bool) -> Result<()> {
     let manifest = read_manifest(&repo_root)?;
     let strict = strict || manifest.strict_mode;
 
-    let failures = verify_failures_with_manifest(&repo_root, &manifest)?;
+    let failures = verify_failures(&repo_root)?;
 
     if !failures.is_empty() {
         if json {
@@ -2949,15 +2995,12 @@ fn cmd_rewrap() -> Result<()> {
     Ok(())
 }
 
-fn reencrypt_with_current_session(
-    repo_root: &std::path::Path,
-    manifest: &RepositoryManifest,
-) -> Result<usize> {
+fn reencrypt_with_current_session(repo_root: &std::path::Path) -> Result<usize> {
     if repo_key_from_session()?.is_none() {
         anyhow::bail!("repository is locked; run `git-ssh-crypt unlock` first");
     }
 
-    let protected = protected_tracked_files(repo_root, manifest)?;
+    let protected = protected_tracked_files(repo_root)?;
     if protected.is_empty() {
         return Ok(0);
     }
@@ -2972,9 +3015,8 @@ fn reencrypt_with_current_session(
 
 fn cmd_reencrypt() -> Result<()> {
     let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
 
-    let refreshed = reencrypt_with_current_session(&repo_root, &manifest)?;
+    let refreshed = reencrypt_with_current_session(&repo_root)?;
     if refreshed == 0 {
         println!("reencrypt: no protected tracked files found");
         return Ok(());
@@ -3039,7 +3081,7 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
         wrapped.len()
     );
     if auto_reencrypt {
-        match reencrypt_with_current_session(&repo_root, &manifest) {
+        match reencrypt_with_current_session(&repo_root) {
             Ok(count) => {
                 println!(
                     "rotate-key: auto-reencrypt refreshed {} protected files",
@@ -3070,8 +3112,7 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
                     ));
                 }
                 if rollback_errors.is_empty() {
-                    if let Err(restore_err) = reencrypt_with_current_session(&repo_root, &manifest)
-                    {
+                    if let Err(restore_err) = reencrypt_with_current_session(&repo_root) {
                         rollback_errors.push(format!("reencrypt rollback failed: {restore_err:#}"));
                     }
                 }
@@ -3347,7 +3388,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
                 "algorithm": format!("{:?}", manifest.encryption_algorithm),
                 "strict_mode": manifest.strict_mode,
                 "repo_key_id": manifest.repo_key_id,
-                "protected_patterns": manifest.protected_patterns,
+            "protected_patterns": read_gitattributes_patterns(&repo_root),
                 "min_recipients": manifest.min_recipients,
                 "allowed_key_types": manifest.allowed_key_types,
                 "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
@@ -3367,7 +3408,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         );
         println!(
             "doctor: protected patterns {}",
-            manifest.protected_patterns.join(", ")
+            read_gitattributes_patterns(&repo_root).join(", ")
         );
         println!("doctor: min_recipients {}", manifest.min_recipients);
         println!(
@@ -3427,25 +3468,21 @@ fn cmd_clean(path: &str) -> Result<()> {
     let manifest = read_manifest(&repo_root)?;
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = clean(&manifest, key.as_deref(), path, &input)?;
+    let output = clean(manifest.encryption_algorithm, key.as_deref(), path, &input)?;
     write_stdout_all(&output)
 }
 
 fn cmd_smudge(path: &str) -> Result<()> {
-    let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = smudge(&manifest, key.as_deref(), path, &input)?;
+    let output = smudge(key.as_deref(), path, &input)?;
     write_stdout_all(&output)
 }
 
 fn cmd_diff(path: &str) -> Result<()> {
-    let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = diff(&manifest, key.as_deref(), path, &input)?;
+    let output = diff(key.as_deref(), path, &input)?;
     write_stdout_all(&output)
 }
 
@@ -3778,8 +3815,13 @@ fn run_filter_command(
     let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
 
     match command {
-        "clean" => clean(&manifest, key.as_deref(), pathname, input),
-        "smudge" => smudge(&manifest, key.as_deref(), pathname, input),
+        "clean" => clean(
+            manifest.encryption_algorithm,
+            key.as_deref(),
+            pathname,
+            input,
+        ),
+        "smudge" => smudge(key.as_deref(), pathname, input),
         _ => anyhow::bail!("unsupported filter command: {command}"),
     }
 }

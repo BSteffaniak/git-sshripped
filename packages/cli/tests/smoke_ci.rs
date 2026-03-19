@@ -172,7 +172,7 @@ fn ci_smoke_init_unlock_doctor_verify() {
         "--json",
     ]));
     assert!(migrate_out.contains("\"ok\": true"));
-    assert!(migrate_out.contains("legacy.secret"));
+    assert!(migrate_out.contains("\"imported_patterns\": 1"));
 
     run_ok(Command::new(bin).current_dir(repo).args(["install"]));
     run_ok(Command::new(bin).current_dir(repo).args([
