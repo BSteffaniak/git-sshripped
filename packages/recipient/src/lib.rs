@@ -14,6 +14,7 @@ use age::ssh::Recipient as SshRecipient;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use git_ssh_crypt_recipient_models::{RecipientKey, RecipientSource};
+use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use sha2::{Digest, Sha256};
 
@@ -31,6 +32,7 @@ pub struct GithubUserKeys {
     pub url: String,
     pub keys: Vec<String>,
     pub backend: GithubBackend,
+    pub authenticated: bool,
 }
 
 fn fingerprint_for_public_key(key_type: &str, key_body: &str) -> String {
@@ -56,9 +58,15 @@ fn gh_installed() -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
-fn gh_api_json(path: &str) -> Result<String> {
-    let output = Command::new("gh")
-        .args(["api", path])
+fn gh_api_lines(path: &str, jq: &str, paginate: bool) -> Result<Vec<String>> {
+    let mut cmd = Command::new("gh");
+    cmd.arg("api");
+    if paginate {
+        cmd.arg("--paginate");
+    }
+    cmd.arg(path).arg("--jq").arg(jq);
+
+    let output = cmd
         .output()
         .with_context(|| format!("failed to execute gh api {path}"))?;
     if !output.status.success() {
@@ -68,7 +76,14 @@ fn gh_api_json(path: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    String::from_utf8(output.stdout).context("gh api output is not utf8")
+
+    let text = String::from_utf8(output.stdout).context("gh api output is not utf8")?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
 }
 
 fn rest_headers() -> Result<HeaderMap> {
@@ -86,95 +101,163 @@ fn rest_headers() -> Result<HeaderMap> {
     Ok(headers)
 }
 
+fn rest_authenticated() -> bool {
+    std::env::var("GITHUB_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn rest_get_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<reqwest::blocking::Response> {
+    let mut attempts = 0_u8;
+    loop {
+        attempts = attempts.saturating_add(1);
+        let request = client.get(url).headers(rest_headers()?);
+        let response = request.send();
+
+        match response {
+            Ok(resp)
+                if resp.status().is_server_error()
+                    || resp.status() == StatusCode::TOO_MANY_REQUESTS =>
+            {
+                if attempts >= 3 {
+                    bail!(
+                        "request to {} failed after retries with status {}",
+                        url,
+                        resp.status()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempts)));
+            }
+            Ok(resp) => return Ok(resp),
+            Err(err) => {
+                if attempts >= 3 {
+                    return Err(err)
+                        .with_context(|| format!("request to {} failed after retries", url));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempts)));
+            }
+        }
+    }
+}
+
+fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get("link")?.to_str().ok()?;
+    for part in link.split(',') {
+        let trimmed = part.trim();
+        if !trimmed.contains("rel=\"next\"") {
+            continue;
+        }
+        let start = trimmed.find('<')?;
+        let end = trimmed.find('>')?;
+        if end > start + 1 {
+            return Some(trimmed[start + 1..end].to_string());
+        }
+    }
+    None
+}
+
 pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
     if gh_installed() {
-        let json_text = gh_api_json(&format!("users/{username}/keys"))?;
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(&json_text).context("failed to parse gh user keys json")?;
-        let keys = parsed
-            .iter()
-            .filter_map(|item| item.get("key").and_then(serde_json::Value::as_str))
-            .map(ToString::to_string)
-            .collect();
+        let keys = gh_api_lines(&format!("users/{username}/keys"), ".[].key", true)?;
         return Ok(GithubUserKeys {
             username: username.to_string(),
             url: format!("https://github.com/{username}.keys"),
             keys,
             backend: GithubBackend::Gh,
+            authenticated: true,
         });
     }
 
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to build reqwest client")?;
-    let resp = client
-        .get(format!("https://api.github.com/users/{username}/keys"))
-        .headers(rest_headers()?)
-        .send()
-        .with_context(|| format!("failed to fetch GitHub user keys for {username}"))?;
-    let resp = resp
-        .error_for_status()
-        .with_context(|| format!("GitHub user keys request failed for {username}"))?;
-    let text = resp
-        .text()
-        .context("failed to read GitHub user keys response")?;
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&text).context("invalid GitHub user keys JSON")?;
-    let keys = parsed
-        .iter()
-        .filter_map(|item| item.get("key").and_then(serde_json::Value::as_str))
-        .map(ToString::to_string)
-        .collect();
+    let mut keys = Vec::new();
+    let mut next = Some(format!(
+        "https://api.github.com/users/{username}/keys?per_page=100"
+    ));
+
+    while let Some(url) = next {
+        let resp = rest_get_with_retry(&client, &url)
+            .with_context(|| format!("failed to fetch GitHub user keys for {username}"))?;
+        let headers = resp.headers().clone();
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("GitHub user keys request failed for {username}"))?;
+        let text = resp
+            .text()
+            .context("failed to read GitHub user keys response")?;
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&text).context("invalid GitHub user keys JSON")?;
+        keys.extend(
+            parsed
+                .iter()
+                .filter_map(|item| item.get("key").and_then(serde_json::Value::as_str))
+                .map(ToString::to_string),
+        );
+        next = parse_next_link(&headers);
+    }
+
     Ok(GithubUserKeys {
         username: username.to_string(),
         url: format!("https://github.com/{username}.keys"),
         keys,
         backend: GithubBackend::Rest,
+        authenticated: rest_authenticated(),
     })
 }
 
-pub fn fetch_github_team_members(org: &str, team: &str) -> Result<(Vec<String>, GithubBackend)> {
+pub fn fetch_github_team_members(
+    org: &str,
+    team: &str,
+) -> Result<(Vec<String>, GithubBackend, bool)> {
     if gh_installed() {
-        let json_text = gh_api_json(&format!("orgs/{org}/teams/{team}/members"))?;
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(&json_text).context("failed to parse gh team members json")?;
-        let members = parsed
-            .iter()
-            .filter_map(|item| item.get("login").and_then(serde_json::Value::as_str))
-            .map(ToString::to_string)
-            .collect();
-        return Ok((members, GithubBackend::Gh));
+        let members = gh_api_lines(
+            &format!("orgs/{org}/teams/{team}/members"),
+            ".[].login",
+            true,
+        )?;
+        return Ok((members, GithubBackend::Gh, true));
     }
 
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to build reqwest client")?;
-    let resp = client
-        .get(format!(
-            "https://api.github.com/orgs/{org}/teams/{team}/members"
-        ))
-        .headers(rest_headers()?)
-        .send()
-        .with_context(|| format!("failed to fetch GitHub team members for {org}/{team}"))?;
+    let mut members = Vec::new();
+    let mut next = Some(format!(
+        "https://api.github.com/orgs/{org}/teams/{team}/members?per_page=100"
+    ));
+    let authenticated = rest_authenticated();
 
-    if !resp.status().is_success() {
-        bail!(
-            "GitHub team members request failed for {org}/{team} (status {}); this may require authenticated access via GITHUB_TOKEN or gh auth",
-            resp.status()
+    while let Some(url) = next {
+        let resp = rest_get_with_retry(&client, &url)
+            .with_context(|| format!("failed to fetch GitHub team members for {org}/{team}"))?;
+
+        if !resp.status().is_success() {
+            bail!(
+                "GitHub team members request failed for {org}/{team} (status {}); this requires authenticated access via GITHUB_TOKEN or gh auth",
+                resp.status()
+            );
+        }
+
+        let headers = resp.headers().clone();
+        let text = resp
+            .text()
+            .context("failed to read GitHub team members response")?;
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&text).context("invalid GitHub team members JSON")?;
+        members.extend(
+            parsed
+                .iter()
+                .filter_map(|item| item.get("login").and_then(serde_json::Value::as_str))
+                .map(ToString::to_string),
         );
+        next = parse_next_link(&headers);
     }
 
-    let text = resp
-        .text()
-        .context("failed to read GitHub team members response")?;
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&text).context("invalid GitHub team members JSON")?;
-    let members = parsed
-        .iter()
-        .filter_map(|item| item.get("login").and_then(serde_json::Value::as_str))
-        .map(ToString::to_string)
-        .collect();
-    Ok((members, GithubBackend::Rest))
+    Ok((members, GithubBackend::Rest, authenticated))
 }
 
 #[must_use]

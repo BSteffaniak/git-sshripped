@@ -63,11 +63,11 @@ git-ssh-crypt lock
 - `git-ssh-crypt add-github-user --username <user> [--auto-wrap]`
 - `git-ssh-crypt list-github-users [--verbose]`
 - `git-ssh-crypt remove-github-user --username <user> [--force]`
-- `git-ssh-crypt refresh-github-keys [--username <user>] [--dry-run] [--json]`
+- `git-ssh-crypt refresh-github-keys [--username <user>] [--dry-run] [--fail-on-drift] [--json]`
 - `git-ssh-crypt add-github-team --org <org> --team <team> [--auto-wrap]`
 - `git-ssh-crypt list-github-teams`
 - `git-ssh-crypt remove-github-team --org <org> --team <team>`
-- `git-ssh-crypt refresh-github-teams [--org <org>] [--team <team>] [--dry-run] [--json]`
+- `git-ssh-crypt refresh-github-teams [--org <org>] [--team <team>] [--dry-run] [--fail-on-drift] [--json]`
 - `git-ssh-crypt access-audit [--identity <path>] [--json]`
 
 ### Maintenance

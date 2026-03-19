@@ -16,9 +16,9 @@ use git_ssh_crypt_filter::{clean, diff, is_protected_path, smudge};
 use git_ssh_crypt_recipient::{
     add_recipient_from_public_key, add_recipients_from_github_keys,
     add_recipients_from_github_source, add_recipients_from_github_username,
-    fetch_github_team_members, list_recipients, remove_recipient_by_fingerprint,
-    remove_recipients_by_fingerprints, wrap_repo_key_for_all_recipients,
-    wrap_repo_key_for_recipient, wrapped_store_dir,
+    fetch_github_team_members, fetch_github_user_keys, list_recipients,
+    remove_recipient_by_fingerprint, remove_recipients_by_fingerprints,
+    wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
 };
 use git_ssh_crypt_recipient_models::RecipientSource;
 use git_ssh_crypt_repository::{
@@ -133,6 +133,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
+        fail_on_drift: bool,
+        #[arg(long)]
         json: bool,
     },
     AddGithubTeam {
@@ -157,6 +159,8 @@ enum Command {
         team: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        fail_on_drift: bool,
         #[arg(long)]
         json: bool,
     },
@@ -257,8 +261,9 @@ fn main() -> Result<()> {
         Command::RefreshGithubKeys {
             username,
             dry_run,
+            fail_on_drift,
             json,
-        } => cmd_refresh_github_keys(username, dry_run, json),
+        } => cmd_refresh_github_keys(username, dry_run, fail_on_drift, json),
         Command::AddGithubTeam {
             org,
             team,
@@ -270,8 +275,9 @@ fn main() -> Result<()> {
             org,
             team,
             dry_run,
+            fail_on_drift,
             json,
-        } => cmd_refresh_github_teams(org, team, dry_run, json),
+        } => cmd_refresh_github_teams(org, team, dry_run, fail_on_drift, json),
         Command::AccessAudit { identities, json } => cmd_access_audit(identities, json),
         Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
         Command::Install => cmd_install(),
@@ -829,7 +835,7 @@ fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let mut registry = read_github_sources(&repo_root)?;
     let session_key = repo_key_from_session()?;
-    let (members, _) = fetch_github_team_members(org, team)?;
+    let (members, _, _) = fetch_github_team_members(org, team)?;
 
     let mut fingerprints = std::collections::BTreeSet::new();
     for member in &members {
@@ -905,7 +911,12 @@ fn cmd_remove_github_team(org: &str, team: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) -> Result<()> {
+fn cmd_refresh_github_keys(
+    username: Option<String>,
+    dry_run: bool,
+    fail_on_drift: bool,
+    json: bool,
+) -> Result<()> {
     let repo_root = current_repo_root()?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets: Vec<_> = registry.users.clone();
@@ -920,15 +931,27 @@ fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) 
 
     let session_key = repo_key_from_session()?;
     let mut events = Vec::new();
+    let mut drift_detected = false;
 
     for source in targets {
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
-        let fetched = add_recipients_from_github_source(
-            &repo_root,
-            &source.url,
-            Some(source.username.clone()),
-        )?;
+        let fetched_user = fetch_github_user_keys(&source.username)?;
+        let fetched = fetched_user
+            .keys
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                add_recipient_from_public_key(
+                    &repo_root,
+                    line,
+                    RecipientSource::GithubKeys {
+                        url: source.url.clone(),
+                        username: Some(source.username.clone()),
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let after_set: std::collections::HashSet<String> = fetched
             .iter()
             .map(|recipient| recipient.fingerprint.clone())
@@ -937,6 +960,9 @@ fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) 
         let added: Vec<String> = after_set.difference(&before_set).cloned().collect();
         let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
         let unchanged = before_set.intersection(&after_set).count();
+        if !added.is_empty() || !removed.is_empty() {
+            drift_detected = true;
+        }
 
         if !dry_run {
             let mut safe_remove = Vec::new();
@@ -974,6 +1000,8 @@ fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) 
             "removed": removed,
             "unchanged": unchanged,
             "dry_run": dry_run,
+            "backend": format!("{:?}", fetched_user.backend),
+            "authenticated": fetched_user.authenticated,
         }));
     }
 
@@ -984,12 +1012,19 @@ fn cmd_refresh_github_keys(username: Option<String>, dry_run: bool, json: bool) 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"events": events}))?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "events": events,
+                "drift_detected": drift_detected,
+            }))?
         );
     } else {
         for event in events {
             println!("refresh-github-keys: {}", event);
         }
+    }
+
+    if fail_on_drift && drift_detected {
+        anyhow::bail!("refresh-github-keys detected access drift");
     }
 
     Ok(())
@@ -999,6 +1034,7 @@ fn cmd_refresh_github_teams(
     org: Option<String>,
     team: Option<String>,
     dry_run: bool,
+    fail_on_drift: bool,
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
@@ -1017,9 +1053,11 @@ fn cmd_refresh_github_teams(
 
     let session_key = repo_key_from_session()?;
     let mut events = Vec::new();
+    let mut drift_detected = false;
 
     for source in targets {
-        let (members, _) = fetch_github_team_members(&source.org, &source.team)?;
+        let (members, backend, authenticated) =
+            fetch_github_team_members(&source.org, &source.team)?;
         let mut fetched_fingerprints = std::collections::HashSet::new();
 
         for member in &members {
@@ -1047,6 +1085,9 @@ fn cmd_refresh_github_teams(
             .cloned()
             .collect();
         let unchanged = before_set.intersection(&fetched_fingerprints).count();
+        if !added.is_empty() || !removed.is_empty() {
+            drift_detected = true;
+        }
 
         if !dry_run {
             let mut safe_remove = Vec::new();
@@ -1080,6 +1121,8 @@ fn cmd_refresh_github_teams(
             "removed": removed,
             "unchanged": unchanged,
             "dry_run": dry_run,
+            "backend": format!("{:?}", backend),
+            "authenticated": authenticated,
         }));
     }
 
@@ -1090,12 +1133,19 @@ fn cmd_refresh_github_teams(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"events": events}))?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "events": events,
+                "drift_detected": drift_detected,
+            }))?
         );
     } else {
         for event in events {
             println!("refresh-github-teams: {}", event);
         }
+    }
+
+    if fail_on_drift && drift_detected {
+        anyhow::bail!("refresh-github-teams detected access drift");
     }
 
     Ok(())
