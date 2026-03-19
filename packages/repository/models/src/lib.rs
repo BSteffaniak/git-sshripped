@@ -63,7 +63,7 @@ impl Default for RepositoryManifest {
         Self {
             manifest_version: 1,
             encryption_algorithm: EncryptionAlgorithm::AesSivV1,
-            protected_patterns: vec!["secrets/**".to_string()],
+            protected_patterns: vec![],
             strict_mode: false,
             repo_key_id: None,
             min_recipients: 1,
