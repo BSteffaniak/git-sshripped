@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -82,6 +83,41 @@ fn rewrite_manifest_line(repo: &Path, key: &str, value_literal: &str) {
         .join("\n");
     assert!(found, "manifest key should exist: {key}");
     fs::write(&manifest_path, format!("{rewritten}\n")).expect("manifest should rewrite");
+}
+
+fn generate_encrypted_ed25519_keypair(
+    keys_dir: &Path,
+    name: &str,
+    passphrase: &str,
+) -> (PathBuf, PathBuf) {
+    let private_key = keys_dir.join(name);
+    let private_key_str = private_key
+        .to_str()
+        .expect("private key path should be utf8")
+        .to_string();
+    let output = Command::new("ssh-keygen")
+        .args([
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            passphrase,
+            "-C",
+            "enc-test@git-ssh-crypt",
+            "-f",
+            &private_key_str,
+        ])
+        .output()
+        .expect("ssh-keygen should execute");
+    if !output.status.success() {
+        panic!(
+            "ssh-keygen failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    (private_key.clone(), private_key.with_extension("pub"))
 }
 
 #[test]
@@ -965,4 +1001,96 @@ fn worktree_key_rotation_causes_old_branch_session_mismatch_until_unlock() {
             .current_dir(repo)
             .args(["add", "secrets/oldbranch.env"]),
     );
+}
+
+#[test]
+fn unlock_with_encrypted_ssh_private_key_via_env_passphrase() {
+    let bin = env!("CARGO_BIN_EXE_git-ssh-crypt");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let passphrase = "integration-passphrase";
+    let (private_key, public_key) =
+        generate_encrypted_ed25519_keypair(&keys_dir, "id_ed25519_enc", passphrase);
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    configure_filter_paths(repo, bin);
+
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .env("GSC_SSH_KEY_PASSPHRASE", passphrase)
+            .args([
+                "unlock",
+                "--identity",
+                private_key
+                    .to_str()
+                    .expect("private key path should be utf8"),
+            ]),
+    );
+
+    let secret_dir = repo.join("secrets");
+    fs::create_dir_all(&secret_dir).expect("secrets dir should create");
+    let secret_file = secret_dir.join("enc.env");
+    fs::write(&secret_file, b"TOKEN=encrypted_identity\n").expect("secret should write");
+    run_ok(Command::new("git").current_dir(repo).args(["add", "."]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-m", "encrypted key unlock"]),
+    );
+
+    let staged_blob = run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["show", "HEAD:secrets/enc.env"]),
+    );
+    assert!(staged_blob.starts_with(b"GSC1"));
+
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["lock", "--force"]),
+    );
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .env("GSC_SSH_KEY_PASSPHRASE", passphrase)
+            .args([
+                "unlock",
+                "--identity",
+                private_key
+                    .to_str()
+                    .expect("private key path should be utf8"),
+            ]),
+    );
+
+    fs::remove_file(&secret_file).expect("secret file should be removable");
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["checkout", "--", "secrets/enc.env"]),
+    );
+    let unlocked_view = fs::read_to_string(&secret_file).expect("unlocked view should read utf8");
+    assert_eq!(unlocked_view, "TOKEN=encrypted_identity\n");
 }
