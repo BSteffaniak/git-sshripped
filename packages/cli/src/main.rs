@@ -20,7 +20,7 @@ use git_ssh_crypt_recipient::{
     remove_recipient_by_fingerprint, remove_recipients_by_fingerprints,
     wrap_repo_key_for_all_recipients, wrap_repo_key_for_recipient, wrapped_store_dir,
 };
-use git_ssh_crypt_recipient_models::RecipientSource;
+use git_ssh_crypt_recipient_models::{RecipientKey, RecipientSource};
 use git_ssh_crypt_repository::{
     install_git_filters, install_gitattributes, read_github_sources, read_local_config,
     read_manifest, write_github_sources, write_local_config, write_manifest,
@@ -455,6 +455,188 @@ fn now_unix() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+fn allowed_key_types_set(manifest: &RepositoryManifest) -> std::collections::HashSet<&str> {
+    manifest
+        .allowed_key_types
+        .iter()
+        .map(String::as_str)
+        .collect()
+}
+
+fn enforce_allowed_key_types_for_added_recipients(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    existing_fingerprints: &std::collections::HashSet<String>,
+    added: &[RecipientKey],
+    action: &str,
+) -> Result<()> {
+    let allowed = allowed_key_types_set(manifest);
+    let mut invalid_existing = Vec::new();
+    let mut invalid_new = Vec::new();
+
+    for recipient in added {
+        if allowed.contains(recipient.key_type.as_str()) {
+            continue;
+        }
+        if existing_fingerprints.contains(&recipient.fingerprint) {
+            invalid_existing.push(format!(
+                "{} ({})",
+                recipient.fingerprint, recipient.key_type
+            ));
+        } else {
+            invalid_new.push(recipient.fingerprint.clone());
+        }
+    }
+
+    if !invalid_new.is_empty() {
+        let _ = remove_recipients_by_fingerprints(repo_root, &invalid_new)?;
+    }
+
+    if invalid_existing.is_empty() && invalid_new.is_empty() {
+        return Ok(());
+    }
+
+    let mut invalid_all = invalid_existing;
+    invalid_all.extend(invalid_new.into_iter().map(|fingerprint| {
+        let key_type = added
+            .iter()
+            .find(|recipient| recipient.fingerprint == fingerprint)
+            .map(|recipient| recipient.key_type.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("{fingerprint} ({key_type})")
+    }));
+
+    anyhow::bail!(
+        "{action} blocked by manifest policy: disallowed key types [{}]; allowed key types are [{}]",
+        invalid_all.join(", "),
+        manifest.allowed_key_types.join(", ")
+    );
+}
+
+fn enforce_min_recipients(
+    manifest: &RepositoryManifest,
+    resulting_count: usize,
+    action: &str,
+) -> Result<()> {
+    if resulting_count < manifest.min_recipients {
+        anyhow::bail!(
+            "{action} blocked by manifest policy: min_recipients={} but resulting recipients would be {}",
+            manifest.min_recipients,
+            resulting_count
+        );
+    }
+    Ok(())
+}
+
+fn enforce_existing_recipient_policy(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    action: &str,
+) -> Result<()> {
+    let recipients = list_recipients(repo_root)?;
+    enforce_min_recipients(manifest, recipients.len(), action)?;
+    let allowed = allowed_key_types_set(manifest);
+    let disallowed: Vec<String> = recipients
+        .iter()
+        .filter(|recipient| !allowed.contains(recipient.key_type.as_str()))
+        .map(|recipient| format!("{} ({})", recipient.fingerprint, recipient.key_type))
+        .collect();
+    if disallowed.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{action} blocked by manifest policy: disallowed existing recipient key types [{}]; allowed key types are [{}]",
+        disallowed.join(", "),
+        manifest.allowed_key_types.join(", ")
+    )
+}
+
+fn collect_doctor_failures(
+    repo_root: &std::path::Path,
+    common_dir: &std::path::Path,
+    manifest: &RepositoryManifest,
+) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
+
+    if manifest.min_recipients == 0 {
+        failures.push("manifest min_recipients must be at least 1".to_string());
+    }
+    if manifest.allowed_key_types.is_empty() {
+        failures.push("manifest allowed_key_types cannot be empty".to_string());
+    }
+
+    let process_cfg = git_local_config(repo_root, "filter.git-ssh-crypt.process")?;
+    if !process_cfg
+        .as_ref()
+        .is_some_and(|value| value.contains("filter-process"))
+    {
+        failures.push("filter.git-ssh-crypt.process is missing or invalid".to_string());
+    }
+
+    let required_cfg = git_local_config(repo_root, "filter.git-ssh-crypt.required")?;
+    if required_cfg.as_deref() != Some("true") {
+        failures.push("filter.git-ssh-crypt.required should be true".to_string());
+    }
+
+    let gitattributes = repo_root.join(".gitattributes");
+    match fs::read_to_string(&gitattributes) {
+        Ok(text) if text.contains("filter=git-ssh-crypt") => {}
+        Ok(_) => failures.push(".gitattributes has no filter=git-ssh-crypt entries".to_string()),
+        Err(err) => failures.push(format!("cannot read {}: {err}", gitattributes.display())),
+    }
+
+    let recipients = list_recipients(repo_root)?;
+    if recipients.is_empty() {
+        failures.push("no recipients configured".to_string());
+    }
+    if recipients.len() < manifest.min_recipients {
+        failures.push(format!(
+            "recipient count {} is below manifest min_recipients {}",
+            recipients.len(),
+            manifest.min_recipients
+        ));
+    }
+
+    let allowed_types = allowed_key_types_set(manifest);
+    for recipient in &recipients {
+        if !allowed_types.contains(recipient.key_type.as_str()) {
+            failures.push(format!(
+                "recipient {} uses disallowed key type {}",
+                recipient.fingerprint, recipient.key_type
+            ));
+        }
+    }
+
+    let wrapped_files = wrapped_key_files(repo_root)?;
+    if wrapped_files.is_empty() {
+        failures.push("no wrapped keys found".to_string());
+    }
+
+    for recipient in &recipients {
+        let wrapped = wrapped_store_dir(repo_root).join(format!("{}.age", recipient.fingerprint));
+        if !wrapped.exists() {
+            failures.push(format!(
+                "missing wrapped key for recipient {}",
+                recipient.fingerprint
+            ));
+        }
+    }
+
+    if let Some(session) = read_unlock_session(common_dir)? {
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(session.key_b64)
+            .context("unlock session key is invalid base64")?;
+        if decoded.len() != 32 {
+            failures.push(format!(
+                "unlock session key length is {}, expected 32",
+                decoded.len()
+            ));
+        }
+    }
+
+    Ok(failures)
+}
+
 fn fingerprint_in_other_sources(
     registry: &GithubSourceRegistry,
     fingerprint: &str,
@@ -502,6 +684,7 @@ fn cmd_init(
         encryption_algorithm: init.algorithm,
         protected_patterns: init.protected_patterns,
         strict_mode: init.strict_mode,
+        ..RepositoryManifest::default()
     };
 
     write_manifest(&repo_root, &manifest)?;
@@ -685,6 +868,9 @@ fn cmd_status(json: bool) -> Result<()> {
             "state": if session.is_some() { "UNLOCKED" } else { "LOCKED" },
             "algorithm": format!("{:?}", manifest.encryption_algorithm),
             "strict_mode": manifest.strict_mode,
+            "min_recipients": manifest.min_recipients,
+            "allowed_key_types": manifest.allowed_key_types,
+            "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
             "identity": {"label": identity.label, "source": format!("{:?}", identity.source)},
             "recipients": recipients.len(),
             "wrapped_keys": wrapped_files.len(),
@@ -709,6 +895,15 @@ fn cmd_status(json: bool) -> Result<()> {
     println!("scope: all worktrees via {}", common_dir.display());
     println!("algorithm: {:?}", manifest.encryption_algorithm);
     println!("strict_mode: {}", manifest.strict_mode);
+    println!("min_recipients: {}", manifest.min_recipients);
+    println!(
+        "allowed_key_types: {}",
+        manifest.allowed_key_types.join(", ")
+    );
+    println!(
+        "require_doctor_clean_for_rotate: {}",
+        manifest.require_doctor_clean_for_rotate
+    );
     println!("identity: {} ({:?})", identity.label, identity.source);
     println!("recipients: {}", recipients.len());
     println!("wrapped keys: {}", wrapped_files.len());
@@ -732,7 +927,12 @@ fn cmd_add_user(
     github_user: Option<String>,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let session_key = repo_key_from_session()?;
+    let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
+        .into_iter()
+        .map(|recipient| recipient.fingerprint)
+        .collect();
 
     let mut new_recipients = Vec::new();
 
@@ -774,6 +974,14 @@ fn cmd_add_user(
             "provide --key <pubkey|path.pub>, --github-keys-url <url>, or --github-user <username>"
         );
     }
+
+    enforce_allowed_key_types_for_added_recipients(
+        &repo_root,
+        &manifest,
+        &existing_fingerprints,
+        &new_recipients,
+        "add-user",
+    )?;
 
     if let Some(key) = session_key {
         let mut wrapped_count = 0;
@@ -826,6 +1034,7 @@ fn cmd_list_users(verbose: bool) -> Result<()> {
 
 fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let recipients = list_recipients(&repo_root)?;
 
     let exists = recipients
@@ -841,6 +1050,8 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
         );
     }
 
+    enforce_min_recipients(&manifest, recipients.len().saturating_sub(1), "remove-user")?;
+
     let removed = remove_recipient_by_fingerprint(&repo_root, fingerprint)?;
     if !removed {
         anyhow::bail!("no files were removed for recipient {fingerprint}");
@@ -852,10 +1063,22 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
 
 fn cmd_add_github_user(username: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let session_key = repo_key_from_session()?;
+    let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
+        .into_iter()
+        .map(|recipient| recipient.fingerprint)
+        .collect();
 
     let recipients = add_recipients_from_github_username(&repo_root, username)?;
+    enforce_allowed_key_types_for_added_recipients(
+        &repo_root,
+        &manifest,
+        &existing_fingerprints,
+        &recipients,
+        "add-github-user",
+    )?;
     let fingerprints: Vec<String> = recipients
         .iter()
         .map(|recipient| recipient.fingerprint.clone())
@@ -905,6 +1128,7 @@ fn cmd_list_github_users(verbose: bool) -> Result<()> {
 
 fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let Some(source) = registry
         .users
@@ -920,6 +1144,19 @@ fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
         anyhow::bail!("refusing to remove final recipient/source without --force");
     }
 
+    let would_remove = source
+        .fingerprints
+        .iter()
+        .filter(|fingerprint| {
+            !fingerprint_in_other_sources(&registry, fingerprint, Some(username), None)
+        })
+        .count();
+    enforce_min_recipients(
+        &manifest,
+        recipients.len().saturating_sub(would_remove),
+        "remove-github-user",
+    )?;
+
     for fingerprint in &source.fingerprints {
         if !fingerprint_in_other_sources(&registry, fingerprint, Some(username), None) {
             let _ = remove_recipient_by_fingerprint(&repo_root, fingerprint)?;
@@ -934,13 +1171,25 @@ fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
 
 fn cmd_add_github_team(org: &str, team: &str, auto_wrap: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let session_key = repo_key_from_session()?;
     let (members, _, _) = fetch_github_team_members(org, team)?;
 
     let mut fingerprints = std::collections::BTreeSet::new();
     for member in &members {
+        let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
+            .into_iter()
+            .map(|recipient| recipient.fingerprint)
+            .collect();
         let recipients = add_recipients_from_github_username(&repo_root, member)?;
+        enforce_allowed_key_types_for_added_recipients(
+            &repo_root,
+            &manifest,
+            &existing_fingerprints,
+            &recipients,
+            "add-github-team",
+        )?;
         if auto_wrap && let Some(key) = session_key.as_deref() {
             for recipient in &recipients {
                 wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
@@ -988,6 +1237,7 @@ fn cmd_list_github_teams() -> Result<()> {
 
 fn cmd_remove_github_team(org: &str, team: &str) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let Some(source) = registry
         .teams
@@ -997,6 +1247,20 @@ fn cmd_remove_github_team(org: &str, team: &str) -> Result<()> {
     else {
         anyhow::bail!("github team source not found: {org}/{team}");
     };
+
+    let recipients = list_recipients(&repo_root)?;
+    let would_remove = source
+        .fingerprints
+        .iter()
+        .filter(|fingerprint| {
+            !fingerprint_in_other_sources(&registry, fingerprint, None, Some((org, team)))
+        })
+        .count();
+    enforce_min_recipients(
+        &manifest,
+        recipients.len().saturating_sub(would_remove),
+        "remove-github-team",
+    )?;
 
     for fingerprint in &source.fingerprints {
         if !fingerprint_in_other_sources(&registry, fingerprint, None, Some((org, team))) {
@@ -1019,6 +1283,7 @@ fn cmd_refresh_github_keys(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets: Vec<_> = registry.users.clone();
     if let Some(user) = username.as_deref() {
@@ -1035,6 +1300,10 @@ fn cmd_refresh_github_keys(
     let mut drift_detected = false;
 
     for source in targets {
+        let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
+            .into_iter()
+            .map(|recipient| recipient.fingerprint)
+            .collect();
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
         let fetched_user = fetch_github_user_keys(&source.username)?;
@@ -1058,6 +1327,14 @@ fn cmd_refresh_github_keys(
             .map(|recipient| recipient.fingerprint.clone())
             .collect();
 
+        enforce_allowed_key_types_for_added_recipients(
+            &repo_root,
+            &manifest,
+            &existing_fingerprints,
+            &fetched,
+            "refresh-github-keys",
+        )?;
+
         let added: Vec<String> = after_set.difference(&before_set).cloned().collect();
         let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
         let unchanged = before_set.intersection(&after_set).count();
@@ -1077,6 +1354,12 @@ fn cmd_refresh_github_keys(
                     safe_remove.push(fingerprint.clone());
                 }
             }
+            let current_count = list_recipients(&repo_root)?.len();
+            enforce_min_recipients(
+                &manifest,
+                current_count.saturating_sub(safe_remove.len()),
+                "refresh-github-keys",
+            )?;
             let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
 
             if let Some(key) = session_key.as_deref() {
@@ -1139,6 +1422,7 @@ fn cmd_refresh_github_teams(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets = registry.teams.clone();
     if let Some(org) = org.as_deref() {
@@ -1162,7 +1446,19 @@ fn cmd_refresh_github_teams(
         let mut fetched_fingerprints = std::collections::HashSet::new();
 
         for member in &members {
+            let existing_fingerprints: std::collections::HashSet<String> =
+                list_recipients(&repo_root)?
+                    .into_iter()
+                    .map(|recipient| recipient.fingerprint)
+                    .collect();
             let imported = add_recipients_from_github_username(&repo_root, member)?;
+            enforce_allowed_key_types_for_added_recipients(
+                &repo_root,
+                &manifest,
+                &existing_fingerprints,
+                &imported,
+                "refresh-github-teams",
+            )?;
             if let Some(key) = session_key.as_deref()
                 && !dry_run
             {
@@ -1202,6 +1498,12 @@ fn cmd_refresh_github_teams(
                     safe_remove.push(fingerprint.clone());
                 }
             }
+            let current_count = list_recipients(&repo_root)?.len();
+            enforce_min_recipients(
+                &manifest,
+                current_count.saturating_sub(safe_remove.len()),
+                "refresh-github-teams",
+            )?;
             let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
 
             if let Some(entry) = registry
@@ -1402,6 +1704,8 @@ fn cmd_migrate_from_git_crypt(
     json: bool,
 ) -> Result<()> {
     let repo_root = current_repo_root()?;
+    let manifest_policy = read_manifest(&repo_root).unwrap_or_default();
+    enforce_existing_recipient_policy(&repo_root, &manifest_policy, "migrate-from-git-crypt")?;
     let path = repo_root.join(".gitattributes");
     let text =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -1517,6 +1821,8 @@ fn cmd_export_repo_key(out: &str) -> Result<()> {
 fn cmd_import_repo_key(input: &str) -> Result<()> {
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
+    let manifest = read_manifest(&repo_root)?;
+    enforce_existing_recipient_policy(&repo_root, &manifest, "import-repo-key")?;
     let text = fs::read_to_string(input).with_context(|| format!("failed to read {input}"))?;
     let key = hex::decode(text.trim()).context("import key file must contain hex key bytes")?;
     if key.len() != 32 {
@@ -1724,6 +2030,16 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
     };
     let manifest = read_manifest(&repo_root)?;
 
+    if manifest.require_doctor_clean_for_rotate {
+        let failures = collect_doctor_failures(&repo_root, &common_dir, &manifest)?;
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "rotate-key blocked by manifest policy require_doctor_clean_for_rotate=true; run `git-ssh-crypt doctor` and fix: {}",
+                failures.join("; ")
+            );
+        }
+    }
+
     let recipients = list_recipients(&repo_root)?;
     if recipients.is_empty() {
         anyhow::bail!("no recipients configured; cannot rotate repository key");
@@ -1854,6 +2170,13 @@ fn cmd_doctor(json: bool) -> Result<()> {
         }
     };
 
+    if manifest.min_recipients == 0 {
+        failures.push("manifest min_recipients must be at least 1".to_string());
+    }
+    if manifest.allowed_key_types.is_empty() {
+        failures.push("manifest allowed_key_types cannot be empty".to_string());
+    }
+
     let process_cfg = git_local_config(&repo_root, "filter.git-ssh-crypt.process")?;
     if process_cfg
         .as_ref()
@@ -1912,14 +2235,22 @@ fn cmd_doctor(json: bool) -> Result<()> {
         if !json {
             println!("check recipients: PASS ({})", recipients.len());
         }
+        let allowed_types = allowed_key_types_set(&manifest);
         for recipient in &recipients {
-            if recipient.key_type != "ssh-ed25519" && recipient.key_type != "ssh-rsa" {
+            if !allowed_types.contains(recipient.key_type.as_str()) {
                 failures.push(format!(
-                    "recipient {} uses unsupported key type {}",
+                    "recipient {} uses disallowed key type {}",
                     recipient.fingerprint, recipient.key_type
                 ));
             }
         }
+    }
+    if recipients.len() < manifest.min_recipients {
+        failures.push(format!(
+            "recipient count {} is below manifest min_recipients {}",
+            recipients.len(),
+            manifest.min_recipients
+        ));
     }
 
     let wrapped_files = wrapped_key_files(&repo_root)?;
@@ -1946,8 +2277,8 @@ fn cmd_doctor(json: bool) -> Result<()> {
 
     let helper = resolve_agent_helper(&repo_root)?;
     if !json {
-        match helper {
-            Some((ref path, ref source)) => {
+        match &helper {
+            Some((path, source)) => {
                 println!(
                     "check agent helper: PASS ({} from {})",
                     path.display(),
@@ -1994,6 +2325,9 @@ fn cmd_doctor(json: bool) -> Result<()> {
                 "algorithm": format!("{:?}", manifest.encryption_algorithm),
                 "strict_mode": manifest.strict_mode,
                 "protected_patterns": manifest.protected_patterns,
+                "min_recipients": manifest.min_recipients,
+                "allowed_key_types": manifest.allowed_key_types,
+                "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
                 "agent_helper_resolved": helper.as_ref().map(|(path, _)| path.display().to_string()),
                 "agent_helper_source": helper.as_ref().map(|(_, source)| source.clone()),
                 "failures": failures,
@@ -2005,6 +2339,15 @@ fn cmd_doctor(json: bool) -> Result<()> {
         println!(
             "doctor: protected patterns {}",
             manifest.protected_patterns.join(", ")
+        );
+        println!("doctor: min_recipients {}", manifest.min_recipients);
+        println!(
+            "doctor: allowed_key_types {}",
+            manifest.allowed_key_types.join(", ")
+        );
+        println!(
+            "doctor: require_doctor_clean_for_rotate {}",
+            manifest.require_doctor_clean_for_rotate
         );
     }
 

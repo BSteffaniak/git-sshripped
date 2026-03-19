@@ -5,11 +5,15 @@
 use git_ssh_crypt_encryption_models::EncryptionAlgorithm;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RepositoryManifest {
     pub manifest_version: u32,
     pub encryption_algorithm: EncryptionAlgorithm,
     pub protected_patterns: Vec<String>,
     pub strict_mode: bool,
+    pub min_recipients: usize,
+    pub allowed_key_types: Vec<String>,
+    pub require_doctor_clean_for_rotate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -47,6 +51,9 @@ impl Default for RepositoryManifest {
             encryption_algorithm: EncryptionAlgorithm::AesSivV1,
             protected_patterns: vec!["secrets/**".to_string()],
             strict_mode: false,
+            min_recipients: 1,
+            allowed_key_types: vec!["ssh-ed25519".to_string(), "ssh-rsa".to_string()],
+            require_doctor_clean_for_rotate: false,
         }
     }
 }
