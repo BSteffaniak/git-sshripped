@@ -217,3 +217,94 @@ pub fn install_git_filters(repo_root: &Path, bin: &str) -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Agent-wrapped key file helpers
+// ---------------------------------------------------------------------------
+
+/// Directory that stores wrapped repo keys.
+#[must_use]
+pub fn wrapped_dir(repo_root: &Path) -> PathBuf {
+    metadata_dir(repo_root).join("wrapped")
+}
+
+/// Path to an agent-wrapped key file for a given fingerprint.
+#[must_use]
+pub fn agent_wrap_file(repo_root: &Path, fingerprint: &str) -> PathBuf {
+    wrapped_dir(repo_root).join(format!("{fingerprint}.agent-wrap.toml"))
+}
+
+/// Read an agent-wrapped key file, returning `None` if the file does not exist.
+///
+/// # Errors
+///
+/// Returns an error if the file exists but cannot be read or parsed.
+pub fn read_agent_wrap(
+    repo_root: &Path,
+    fingerprint: &str,
+) -> Result<Option<git_sshripped_ssh_agent_models::AgentWrappedKey>> {
+    let file = agent_wrap_file(repo_root, fingerprint);
+    if !file.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&file)
+        .with_context(|| format!("failed to read agent-wrap file {}", file.display()))?;
+    let key: git_sshripped_ssh_agent_models::AgentWrappedKey =
+        toml::from_str(&text).context("failed to parse agent-wrap file")?;
+    Ok(Some(key))
+}
+
+/// Write an agent-wrapped key file.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created, the file cannot be
+/// serialized, or the file cannot be written.
+pub fn write_agent_wrap(
+    repo_root: &Path,
+    wrapped: &git_sshripped_ssh_agent_models::AgentWrappedKey,
+) -> Result<()> {
+    let dir = wrapped_dir(repo_root);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create wrapped directory {}", dir.display()))?;
+    let file = agent_wrap_file(repo_root, &wrapped.fingerprint);
+    let text = toml::to_string_pretty(wrapped).context("failed to serialize agent-wrap key")?;
+    fs::write(&file, text)
+        .with_context(|| format!("failed to write agent-wrap file {}", file.display()))?;
+    Ok(())
+}
+
+/// List all `.agent-wrap.toml` files in the wrapped directory.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be read.
+pub fn list_agent_wrap_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
+    let dir = wrapped_dir(repo_root);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".agent-wrap.toml"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+/// Parse an agent-wrapped key from a TOML string.
+///
+/// # Errors
+///
+/// Returns an error if the string is not valid TOML or does not match the
+/// expected schema.
+pub fn parse_agent_wrap(text: &str) -> Result<git_sshripped_ssh_agent_models::AgentWrappedKey> {
+    toml::from_str(text).context("failed to parse agent-wrap TOML")
+}

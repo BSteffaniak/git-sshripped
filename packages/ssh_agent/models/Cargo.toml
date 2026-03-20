@@ -1,0 +1,18 @@
+[package]
+authors = { workspace = true }
+categories = ["command-line-utilities", "development-tools"]
+description = "SSH agent wrapped key models for git-sshripped"
+edition = { workspace = true }
+keywords = ["agent", "models", "ssh"]
+license = { workspace = true }
+name = "git_sshripped_ssh_agent_models"
+readme = "README.md"
+repository = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[features]
+default = []
+fail-on-warnings = []

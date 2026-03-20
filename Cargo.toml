@@ -15,6 +15,8 @@ members = [
   "packages/filter/models",
   "packages/ssh_identity",
   "packages/ssh_identity/models",
+  "packages/ssh_agent",
+  "packages/ssh_agent/models",
   "packages/sshrypt-alias",
   "packages/sshript-alias",
 ]
@@ -42,12 +44,17 @@ git_sshripped_repository = { version = "0.1.8", path = "packages/repository", de
 git_sshripped_repository_models = { version = "0.1.8", path = "packages/repository/models" }
 git_sshripped_ssh_identity = { version = "0.1.8", path = "packages/ssh_identity", default-features = false }
 git_sshripped_ssh_identity_models = { version = "0.1.8", path = "packages/ssh_identity/models" }
+git_sshripped_ssh_agent = { version = "0.1.8", path = "packages/ssh_agent", default-features = false }
+git_sshripped_ssh_agent_models = { version = "0.1.8", path = "packages/ssh_agent/models" }
 git_sshripped_worktree = { version = "0.1.8", path = "packages/worktree", default-features = false }
 git_sshripped_worktree_models = { version = "0.1.8", path = "packages/worktree/models" }
 
 age = { version = "0.11.1", default-features = false, features = ["ssh"] }
 anyhow = { version = "1.0.98", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
+  "std",
+] }
 clap = { version = "4.5.40", default-features = false }
 dirs = { version = "6.0.0", default-features = false }
 globset = { version = "0.4.16", default-features = false }
@@ -63,6 +70,8 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 serde = { version = "1.0.219", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.140", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
+ssh-agent-client-rs = { version = "1.1.2", default-features = false }
+ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 thiserror = { version = "2.0.12", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 toml = { version = "0.8.20", default-features = false }
