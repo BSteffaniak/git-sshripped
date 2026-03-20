@@ -44,6 +44,50 @@ impl age::Callbacks for TerminalCallbacks {
     }
 }
 
+/// Maximum number of passphrase attempts for encrypted SSH keys.
+const MAX_PASSPHRASE_ATTEMPTS: u32 = 3;
+
+/// Decrypt a passphrase-protected SSH key interactively with retries.
+///
+/// Prompts for the passphrase up to [`MAX_PASSPHRASE_ATTEMPTS`] times.
+/// Checks the `GSC_SSH_KEY_PASSPHRASE` environment variable first.
+///
+/// # Errors
+///
+/// Returns an error if the passphrase is wrong after all attempts or if
+/// the terminal prompt fails.
+fn decrypt_encrypted_key(
+    enc: &age::ssh::EncryptedKey,
+    path: &std::path::Path,
+) -> Result<SshIdentity> {
+    for attempt in 1..=MAX_PASSPHRASE_ATTEMPTS {
+        let passphrase = if let Ok(p) = std::env::var("GSC_SSH_KEY_PASSPHRASE")
+            && !p.is_empty()
+        {
+            SecretString::from(p)
+        } else {
+            let prompt = format!("Enter passphrase for {}", path.display());
+            let p = rpassword::prompt_password(format!("{prompt}: "))
+                .context("failed to read passphrase from terminal")?;
+            SecretString::from(p)
+        };
+
+        match enc.decrypt(passphrase) {
+            Ok(decrypted) => return Ok(SshIdentity::from(decrypted)),
+            Err(_) if attempt < MAX_PASSPHRASE_ATTEMPTS => {
+                eprintln!("wrong passphrase, try again ({attempt}/{MAX_PASSPHRASE_ATTEMPTS})");
+            }
+            Err(_) => {
+                anyhow::bail!(
+                    "failed to decrypt {} after {MAX_PASSPHRASE_ATTEMPTS} attempts",
+                    path.display()
+                );
+            }
+        }
+    }
+    unreachable!()
+}
+
 #[must_use]
 fn ssh_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh"))
@@ -419,16 +463,21 @@ pub fn unwrap_repo_key_from_wrapped_files<S: ::std::hash::BuildHasher>(
         let filename = Some(identity_file.display().to_string());
         let identity = SshIdentity::from_buffer(std::io::Cursor::new(&content), filename)
             .with_context(|| format!("failed parsing identity file {}", identity_file.display()))?;
-        if matches!(&identity, SshIdentity::Encrypted(_))
-            && !interactive_identities.contains(identity_file)
-        {
-            eprintln!(
-                "skipping passphrase-protected key {} (pass --identity to use it)",
-                identity_file.display()
-            );
-            continue;
+        if let SshIdentity::Encrypted(ref enc) = identity {
+            if !interactive_identities.contains(identity_file) {
+                eprintln!(
+                    "skipping passphrase-protected key {} (pass --identity to use it)",
+                    identity_file.display()
+                );
+                continue;
+            }
+            // Decrypt the key upfront so we only prompt for the passphrase
+            // once, rather than once per wrapped file.
+            let decrypted = decrypt_encrypted_key(enc, identity_file)?;
+            identities.push((decrypted, identity_file.clone()));
+        } else {
+            identities.push((identity, identity_file.clone()));
         }
-        identities.push((identity, identity_file.clone()));
     }
 
     for wrapped in wrapped_files {

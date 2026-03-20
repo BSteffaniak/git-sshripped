@@ -1341,6 +1341,7 @@ fn unlock_with_encrypted_ssh_private_key_fails_with_wrong_env_passphrase() {
         stderr.contains("could not decrypt any wrapped key")
             || stderr.contains("key decryption")
             || stderr.contains("invalid passphrase")
+            || stderr.contains("failed to decrypt")
     );
 }
 
