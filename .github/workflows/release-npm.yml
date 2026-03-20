@@ -127,20 +127,40 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=0
           for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-x64-musl win32-x64; do
             echo "Publishing @git-sshripped/${pkg}..."
-            npm publish "./npm/${pkg}"
+            output=$(npm publish "./npm/${pkg}" 2>&1) && {
+              echo "  published"
+              continue
+            }
+            if echo "$output" | grep -q "previously published versions"; then
+              echo "  already published, skipping"
+            else
+              echo "$output"
+              echo "  failed"
+              failed=1
+            fi
           done
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more platform packages failed to publish"
+            exit 1
+          fi
 
       - name: Publish main package
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          set -euo pipefail
           echo "Publishing git-sshripped..."
-          npm publish ./npm/git-sshripped
+          output=$(npm publish ./npm/git-sshripped 2>&1) && exit 0
+          if echo "$output" | grep -q "previously published versions"; then
+            echo "Already published, skipping"
+          else
+            echo "$output"
+            exit 1
+          fi
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
