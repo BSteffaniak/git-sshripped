@@ -123,6 +123,10 @@ enum Command {
         prefer_agent: bool,
         #[arg(long)]
         no_agent: bool,
+        /// Exit successfully even if unlock fails (useful for postinstall scripts
+        /// where not all users have access to encrypted files)
+        #[arg(long)]
+        soft: bool,
     },
     Lock {
         #[arg(long)]
@@ -357,7 +361,19 @@ fn dispatch_command(command: Command) -> Result<()> {
             github_user,
             prefer_agent,
             no_agent,
-        } => cmd_unlock(key_hex, identities, github_user, prefer_agent, no_agent),
+            soft,
+        } => {
+            let result = cmd_unlock(key_hex, identities, github_user, prefer_agent, no_agent);
+            if soft {
+                if let Err(e) = result {
+                    eprintln!(
+                        "warning: git-sshripped unlock failed (--soft mode, continuing anyway): {e:#}"
+                    );
+                    return Ok(());
+                }
+            }
+            result
+        }
         Command::Lock { force, no_scrub } => cmd_lock(force, no_scrub),
         Command::Status { json } => cmd_status(json),
         Command::Doctor { json } => cmd_doctor(json),
