@@ -352,6 +352,21 @@ pub fn fetch_github_user_keys_with_options(
                 resp.status()
             );
         }
+        if !options.private_source_hard_fail
+            && (resp.status() == StatusCode::UNAUTHORIZED
+                || resp.status() == StatusCode::FORBIDDEN
+                || resp.status() == StatusCode::NOT_FOUND)
+        {
+            return Ok(GithubUserKeys {
+                username: username.to_string(),
+                url: github_web_keys_url(&options.web_base_url, username),
+                keys: Vec::new(),
+                backend: GithubBackend::Rest,
+                authenticated: rest_authenticated(options.auth_mode),
+                auth_mode: options.auth_mode,
+                metadata,
+            });
+        }
 
         let headers = resp.headers().clone();
         if !applied_etag {
