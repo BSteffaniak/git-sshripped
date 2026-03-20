@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="git-sshripped logo" width="200">
+</p>
+
 # git-sshripped
 
 `git-sshripped` keeps selected files encrypted in Git while still letting you work with plaintext when the repository is unlocked.
