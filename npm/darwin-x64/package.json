@@ -7,8 +7,12 @@
     "type": "git",
     "url": "git+https://github.com/BSteffaniak/git-sshripped.git"
   },
-  "os": ["darwin"],
-  "cpu": ["x64"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "preferUnplugged": true,
   "engines": {
     "node": ">=18"
