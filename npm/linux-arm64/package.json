@@ -1,6 +1,6 @@
 {
   "name": "@git-sshripped/linux-arm64",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "git-sshripped binary for Linux ARM64",
   "license": "MPL-2.0",
   "repository": {
