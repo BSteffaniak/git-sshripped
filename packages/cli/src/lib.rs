@@ -2895,6 +2895,18 @@ fn cmd_export_repo_key(out: &str) -> Result<()> {
     };
     let encoded = hex::encode(key);
     fs::write(out, format!("{encoded}\n")).with_context(|| format!("failed to write {out}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(out)
+            .with_context(|| format!("failed to read metadata for {out}"))?
+            .permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(out, perms)
+            .with_context(|| format!("failed to set secure permissions on {out}"))?;
+    }
+
     println!("export-repo-key: wrote key material to {out}");
     Ok(())
 }
