@@ -162,11 +162,14 @@ enum Command {
         #[arg(long, conflicts_with = "auto_wrap")]
         no_auto_wrap: bool,
         /// Add all GitHub keys for the user, not just those matching local private keys
-        #[arg(long, conflicts_with = "key")]
+        #[arg(long, conflicts_with_all = ["key", "key_file"])]
         all: bool,
         /// Only add the GitHub key matching this public key line
-        #[arg(long, conflicts_with = "all")]
+        #[arg(long, conflicts_with_all = ["all", "key_file"])]
         key: Option<String>,
+        /// Read the public key from a file instead of passing it inline
+        #[arg(long, conflicts_with_all = ["all", "key"])]
+        key_file: Option<String>,
     },
     ListGithubUsers {
         #[arg(long)]
@@ -341,7 +344,8 @@ pub fn run() -> Result<()> {
             no_auto_wrap,
             all,
             key,
-        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap, all, key),
+            key_file,
+        } => cmd_add_github_user(&username, auto_wrap || !no_auto_wrap, all, key, key_file),
         Command::ListGithubUsers { verbose } => cmd_list_github_users(verbose),
         Command::RemoveGithubUser { username, force } => cmd_remove_github_user(&username, force),
         Command::RefreshGithubKeys {
@@ -1629,7 +1633,18 @@ fn cmd_add_github_user(
     auto_wrap: bool,
     all: bool,
     key: Option<String>,
+    key_file: Option<String>,
 ) -> Result<()> {
+    let effective_key = match (key, key_file) {
+        (Some(k), _) => Some(k),
+        (_, Some(path)) => {
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read key file '{path}'"))?;
+            Some(contents.trim().to_string())
+        }
+        _ => None,
+    };
+
     let repo_root = current_repo_root()?;
     let github_options = github_fetch_options(&repo_root)?;
     let manifest = read_manifest(&repo_root)?;
@@ -1655,7 +1670,7 @@ fn cmd_add_github_user(
 
     let keys_to_add: Vec<&str> = if all {
         fetched_keys.clone()
-    } else if let Some(ref provided_key) = key {
+    } else if let Some(ref provided_key) = effective_key {
         // Match the provided public key against the fetched GitHub keys.
         let provided_prefix = ssh_key_prefix(provided_key);
         let matched: Vec<&str> = fetched_keys

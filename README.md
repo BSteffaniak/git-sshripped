@@ -72,7 +72,7 @@ repo key (raw bytes or 64-char hex).
 - `git-sshripped revoke-user --fingerprint <fp> [--auto-reencrypt] [--json]`
 - `git-sshripped revoke-user --github-user <user> [--all-keys-for-user] [--auto-reencrypt] [--json]`
 - `git-sshripped revoke-user --org <org> --team <team> [--auto-reencrypt] [--json]`
-- `git-sshripped add-github-user --username <user> [--all] [--key <pub-key>] [--no-auto-wrap]`
+- `git-sshripped add-github-user --username <user> [--all] [--key <pub-key>] [--key-file <path>] [--no-auto-wrap]`
 - `git-sshripped list-github-users [--verbose]`
 - `git-sshripped remove-github-user --username <user> [--force]`
 - `git-sshripped refresh-github-keys [--username <user>] [--dry-run] [--fail-on-drift] [--json]`
