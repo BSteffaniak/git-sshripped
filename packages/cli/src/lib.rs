@@ -1203,10 +1203,16 @@ fn cmd_unlock(
     let mut manifest = read_manifest(&repo_root)?;
 
     // If there is already a valid unlock session, skip the expensive key-unwrap path.
+    // Still check out any files that are encrypted on disk (e.g. fresh clone where
+    // another worktree already created the session, or a previous interrupted unlock).
     if key_hex.is_none()
         && let Ok(Some(_)) = repo_key_from_session_in(&common_dir, Some(&manifest))
     {
         install_git_filters(&repo_root, &current_bin_path())?;
+        let decrypted_count = checkout_encrypted_worktree_files(&repo_root);
+        if decrypted_count > 0 {
+            println!("decrypted {decrypted_count} protected files in working tree");
+        }
         println!("repository is already unlocked");
         return Ok(());
     }
@@ -1294,7 +1300,8 @@ fn checkout_encrypted_worktree_files(repo_root: &std::path::Path) -> usize {
     let mut decrypted = 0usize;
     for batch in encrypted.chunks(GIT_CHECKOUT_BATCH_SIZE) {
         let mut cmd = std::process::Command::new("git");
-        cmd.current_dir(repo_root).args(["checkout", "--"]);
+        cmd.current_dir(repo_root)
+            .args(["-c", "core.hooksPath=", "checkout", "--"]);
         for path in batch {
             cmd.arg(path);
         }
