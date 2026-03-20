@@ -1523,6 +1523,9 @@ fn cmd_revoke_user(
             "revoke-user requires exactly one selector: --fingerprint, --github-user, or --org/--team"
         );
     }
+    if org.is_some() != team.is_some() {
+        anyhow::bail!("--org and --team must be specified together");
+    }
 
     let target = if let Some(fingerprint) = fingerprint {
         cmd_remove_user(&fingerprint, force)?;
