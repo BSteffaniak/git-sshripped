@@ -20,6 +20,12 @@ impl EncryptionAlgorithm {
         }
     }
 
+    /// Parse an algorithm from its binary id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncryptionModelsError::UnknownAlgorithm`] if `id` does not
+    /// correspond to a known algorithm.
     pub const fn from_id(id: u8) -> Result<Self, EncryptionModelsError> {
         match id {
             1 => Ok(Self::AesSivV1),

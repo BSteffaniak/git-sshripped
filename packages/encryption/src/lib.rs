@@ -40,6 +40,12 @@ pub fn is_encrypted(content: &[u8]) -> bool {
     content.starts_with(&ENCRYPTED_MAGIC)
 }
 
+/// Encrypt plaintext content for a given file path.
+///
+/// # Errors
+///
+/// Returns an error if key derivation or AES-SIV encryption fails, or if the
+/// `crypto-aes-siv` feature is not enabled.
 pub fn encrypt(
     algorithm: EncryptionAlgorithm,
     repo_key: &[u8],
@@ -55,6 +61,12 @@ pub fn encrypt(
     }
 }
 
+/// Decrypt encrypted content for a given file path.
+///
+/// # Errors
+///
+/// Returns an error if the header is invalid, the algorithm is unsupported,
+/// or decryption fails (wrong key or tampered ciphertext).
 pub fn decrypt(repo_key: &[u8], path: &str, encrypted: &[u8]) -> Result<Vec<u8>> {
     let (header, ciphertext) = parse_header(encrypted)?;
 

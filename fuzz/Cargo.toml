@@ -2,6 +2,7 @@
 name = "git_sshripped_fuzz"
 version = "0.0.0"
 publish = false
+readme = "README.md"
 edition = "2024"
 
 [package.metadata]

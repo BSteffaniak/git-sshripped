@@ -31,6 +31,12 @@ pub fn local_config_file(repo_root: &Path) -> PathBuf {
     metadata_dir(repo_root).join("config.toml")
 }
 
+/// Write the repository manifest to `.git-sshripped/manifest.toml`.
+///
+/// # Errors
+///
+/// Returns an error if the metadata directory cannot be created, the manifest
+/// cannot be serialized, or the file cannot be written.
 pub fn write_manifest(repo_root: &Path, manifest: &RepositoryManifest) -> Result<()> {
     let dir = metadata_dir(repo_root);
     fs::create_dir_all(&dir)
@@ -41,6 +47,11 @@ pub fn write_manifest(repo_root: &Path, manifest: &RepositoryManifest) -> Result
     Ok(())
 }
 
+/// Read the repository manifest from `.git-sshripped/manifest.toml`.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed.
 pub fn read_manifest(repo_root: &Path) -> Result<RepositoryManifest> {
     let file = manifest_file(repo_root);
     let text = fs::read_to_string(&file)
@@ -48,6 +59,11 @@ pub fn read_manifest(repo_root: &Path) -> Result<RepositoryManifest> {
     toml::from_str(&text).context("failed to parse repository manifest")
 }
 
+/// Read the GitHub source registry, returning a default if the file does not exist.
+///
+/// # Errors
+///
+/// Returns an error if the file exists but cannot be read or parsed.
 pub fn read_github_sources(repo_root: &Path) -> Result<GithubSourceRegistry> {
     let file = github_sources_file(repo_root);
     if !file.exists() {
@@ -58,6 +74,12 @@ pub fn read_github_sources(repo_root: &Path) -> Result<GithubSourceRegistry> {
     toml::from_str(&text).context("failed to parse github source registry")
 }
 
+/// Write the GitHub source registry to `.git-sshripped/github-sources.toml`.
+///
+/// # Errors
+///
+/// Returns an error if the metadata directory cannot be created, the registry
+/// cannot be serialized, or the file cannot be written.
 pub fn write_github_sources(repo_root: &Path, registry: &GithubSourceRegistry) -> Result<()> {
     let dir = metadata_dir(repo_root);
     fs::create_dir_all(&dir)
@@ -69,6 +91,11 @@ pub fn write_github_sources(repo_root: &Path, registry: &GithubSourceRegistry) -
     Ok(())
 }
 
+/// Read the local repository config, returning a default if the file does not exist.
+///
+/// # Errors
+///
+/// Returns an error if the file exists but cannot be read or parsed.
 pub fn read_local_config(repo_root: &Path) -> Result<RepositoryLocalConfig> {
     let file = local_config_file(repo_root);
     if !file.exists() {
@@ -79,6 +106,12 @@ pub fn read_local_config(repo_root: &Path) -> Result<RepositoryLocalConfig> {
     toml::from_str(&text).context("failed to parse repository local config")
 }
 
+/// Write the local repository config to `.git-sshripped/config.toml`.
+///
+/// # Errors
+///
+/// Returns an error if the metadata directory cannot be created, the config
+/// cannot be serialized, or the file cannot be written.
 pub fn write_local_config(repo_root: &Path, config: &RepositoryLocalConfig) -> Result<()> {
     let dir = metadata_dir(repo_root);
     fs::create_dir_all(&dir)
@@ -90,6 +123,11 @@ pub fn write_local_config(repo_root: &Path, config: &RepositoryLocalConfig) -> R
     Ok(())
 }
 
+/// Append filter/diff attribute lines to `.gitattributes` for the given patterns.
+///
+/// # Errors
+///
+/// Returns an error if the `.gitattributes` file cannot be read or written.
 pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()> {
     let path = repo_root.join(".gitattributes");
     let mut existing = if path.exists() {
@@ -100,11 +138,10 @@ pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()
     };
 
     for pattern in patterns {
-        let line = if let Some(negated) = pattern.strip_prefix('!') {
-            format!("{negated} !filter !diff")
-        } else {
-            format!("{pattern} filter=git-sshripped diff=git-sshripped")
-        };
+        let line = pattern.strip_prefix('!').map_or_else(
+            || format!("{pattern} filter=git-sshripped diff=git-sshripped"),
+            |negated| format!("{negated} !filter !diff"),
+        );
         if !existing.lines().any(|item| item.trim() == line) {
             if !existing.ends_with('\n') && !existing.is_empty() {
                 existing.push('\n');
@@ -119,6 +156,11 @@ pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()
     Ok(())
 }
 
+/// Install Git filter and diff configuration via `git config --local`.
+///
+/// # Errors
+///
+/// Returns an error if any `git config` command fails.
 pub fn install_git_filters(repo_root: &Path, bin: &str) -> Result<()> {
     let pairs = [
         (

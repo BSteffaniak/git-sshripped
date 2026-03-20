@@ -6,6 +6,7 @@ edition = { workspace = true }
 keywords = ["filter", "git", "models"]
 license = { workspace = true }
 name = "git_sshripped_filter_models"
+readme = "README.md"
 repository = { workspace = true }
 version = { workspace = true }
 

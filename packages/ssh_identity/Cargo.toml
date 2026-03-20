@@ -6,6 +6,7 @@ edition = { workspace = true }
 keywords = ["identity", "ssh"]
 license = { workspace = true }
 name = "git_sshripped_ssh_identity"
+readme = "README.md"
 repository = { workspace = true }
 version = { workspace = true }
 

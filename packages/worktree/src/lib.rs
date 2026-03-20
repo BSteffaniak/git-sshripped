@@ -30,10 +30,20 @@ fn git_rev_parse(cwd: &Path, arg: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(text.trim()))
 }
 
+/// Resolve the Git common directory for the current working directory.
+///
+/// # Errors
+///
+/// Returns an error if `git rev-parse --git-common-dir` fails.
 pub fn git_common_dir(cwd: &Path) -> Result<PathBuf> {
     git_rev_parse(cwd, "--git-common-dir")
 }
 
+/// Resolve the working-tree root for the current working directory.
+///
+/// # Errors
+///
+/// Returns an error if `git rev-parse --show-toplevel` fails.
 pub fn git_toplevel(cwd: &Path) -> Result<PathBuf> {
     git_rev_parse(cwd, "--show-toplevel")
 }
@@ -46,6 +56,12 @@ pub fn session_file(common_dir: &Path) -> PathBuf {
         .join("unlock.json")
 }
 
+/// Persist the unlock session to disk.
+///
+/// # Errors
+///
+/// Returns an error if the session directory cannot be created, the session
+/// cannot be serialized, or the file cannot be written.
 pub fn write_unlock_session(
     common_dir: &Path,
     key: &[u8],
@@ -82,6 +98,11 @@ pub fn write_unlock_session(
     Ok(())
 }
 
+/// Remove the unlock session file, locking the repository.
+///
+/// # Errors
+///
+/// Returns an error if the session file exists but cannot be removed.
 pub fn clear_unlock_session(common_dir: &Path) -> Result<()> {
     let file = session_file(common_dir);
     if file.exists() {
@@ -91,6 +112,11 @@ pub fn clear_unlock_session(common_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the current unlock session, if one exists.
+///
+/// # Errors
+///
+/// Returns an error if the session file exists but cannot be read or parsed.
 pub fn read_unlock_session(common_dir: &Path) -> Result<Option<UnlockSession>> {
     let file = session_file(common_dir);
     if !file.exists() {

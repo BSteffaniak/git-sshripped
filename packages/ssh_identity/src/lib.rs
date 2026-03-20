@@ -70,7 +70,10 @@ pub fn discover_ssh_key_files() -> Vec<(PathBuf, PathBuf)> {
         let Some(name) = pub_path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.ends_with(".pub") {
+        if !std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+        {
             continue;
         }
         let private_path = pub_path.with_extension("");
@@ -146,9 +149,11 @@ pub fn default_public_key_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// Returns only the well-known standard public key paths (`id_ed25519.pub`,
-/// `id_rsa.pub`).  Use this when auto-adding recipients during `init` --
-/// we don't want to silently add every key in `~/.ssh/` as a recipient.
+/// Returns only the well-known standard public key paths.
+///
+/// Returns `id_ed25519.pub` and `id_rsa.pub` from `~/.ssh/`.  Use this when
+/// auto-adding recipients during `init` -- we don't want to silently add
+/// every key in `~/.ssh/` as a recipient.
 #[must_use]
 pub fn well_known_public_key_paths() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -186,6 +191,12 @@ pub fn default_private_key_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+/// Query the SSH agent for loaded public keys.
+///
+/// # Errors
+///
+/// Returns an error if `ssh-add -L` fails to execute or produces non-UTF-8
+/// output.
 pub fn agent_public_keys() -> Result<Vec<String>> {
     if std::env::var_os("SSH_AUTH_SOCK").is_none() {
         return Ok(Vec::new());
@@ -210,6 +221,12 @@ pub fn agent_public_keys() -> Result<Vec<String>> {
     Ok(keys)
 }
 
+/// Find local private key files whose public keys are loaded in the SSH agent.
+///
+/// # Errors
+///
+/// Returns an error if the agent cannot be queried or a public key file
+/// cannot be read.
 pub fn private_keys_matching_agent() -> Result<Vec<PathBuf>> {
     let agent_keys = agent_public_keys()?;
     if agent_keys.is_empty() {
@@ -240,7 +257,6 @@ pub fn private_keys_matching_agent() -> Result<Vec<PathBuf>> {
 
         let agent_match = agent_keys.iter().any(|agent_line| {
             let agent_data: String = agent_line
-                .trim()
                 .split_whitespace()
                 .take(2)
                 .collect::<Vec<_>>()
@@ -288,6 +304,12 @@ fn parse_helper_key_output(output: &[u8]) -> Result<Option<Vec<u8>>> {
     anyhow::bail!("agent helper output must be 32 raw bytes or 64-char hex-encoded key")
 }
 
+/// Unwrap a repo key using an external agent helper program.
+///
+/// # Errors
+///
+/// Returns an error if the helper cannot be spawned, times out, or produces
+/// invalid output.
 pub fn unwrap_repo_key_with_agent_helper(
     wrapped_files: &[PathBuf],
     helper_path: &std::path::Path,
@@ -346,6 +368,12 @@ pub fn unwrap_repo_key_with_agent_helper(
     Ok(None)
 }
 
+/// Auto-detect the best available SSH identity.
+///
+/// # Errors
+///
+/// This function is infallible in practice but returns `Result` for
+/// consistency with the rest of the API.
 pub fn detect_identity() -> Result<IdentityDescriptor> {
     if std::env::var_os("SSH_AUTH_SOCK").is_some() {
         return Ok(IdentityDescriptor {
@@ -369,10 +397,16 @@ pub fn detect_identity() -> Result<IdentityDescriptor> {
     })
 }
 
-pub fn unwrap_repo_key_from_wrapped_files(
+/// Try each identity to decrypt a wrapped repo key file.
+///
+/// # Errors
+///
+/// Returns an error if identity files cannot be read or parsed, or if a
+/// wrapped key file is malformed.
+pub fn unwrap_repo_key_from_wrapped_files<S: ::std::hash::BuildHasher>(
     wrapped_files: &[PathBuf],
     identity_files: &[PathBuf],
-    interactive_identities: &HashSet<PathBuf>,
+    interactive_identities: &HashSet<PathBuf, S>,
 ) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
     let mut identities: Vec<(SshIdentity, PathBuf)> = Vec::new();
 
@@ -405,11 +439,11 @@ pub fn unwrap_repo_key_from_wrapped_files(
             let decryptor = Decryptor::new_buffered(std::io::Cursor::new(&wrapped_bytes))
                 .with_context(|| format!("invalid wrapped key format {}", wrapped.display()))?;
             let decrypt_identity = identity.clone().with_callbacks(TerminalCallbacks);
-            let mut reader =
-                match decryptor.decrypt(std::iter::once(&decrypt_identity as &dyn Identity)) {
-                    Ok(reader) => reader,
-                    Err(_) => continue,
-                };
+            let Ok(mut reader) =
+                decryptor.decrypt(std::iter::once(&decrypt_identity as &dyn Identity))
+            else {
+                continue;
+            };
 
             let mut key = Vec::new();
             std::io::Read::read_to_end(&mut reader, &mut key).with_context(|| {
@@ -565,7 +599,10 @@ Host foo
             let Some(name) = pub_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !name.ends_with(".pub") {
+            if !std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+            {
                 continue;
             }
             let private_path = pub_path.with_extension("");

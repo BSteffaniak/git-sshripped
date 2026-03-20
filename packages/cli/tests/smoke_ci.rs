@@ -25,7 +25,7 @@ fn run_ok(cmd: &mut Command) {
     );
 }
 
-fn run_fail_output(cmd: &mut Command) -> String {
+fn _run_fail_output(cmd: &mut Command) -> String {
     let output = cmd.output().expect("command execution should succeed");
     assert!(
         !output.status.success(),

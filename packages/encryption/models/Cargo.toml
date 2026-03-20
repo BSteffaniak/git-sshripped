@@ -6,6 +6,7 @@ edition = { workspace = true }
 keywords = ["crypt", "encryption", "git", "models", "ssh"]
 license = { workspace = true }
 name = "git_sshripped_encryption_models"
+readme = "README.md"
 repository = { workspace = true }
 version = { workspace = true }
 

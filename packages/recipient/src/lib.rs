@@ -260,7 +260,7 @@ fn rest_get_with_retry(
             Err(err) => {
                 if attempts >= 3 {
                     return Err(err)
-                        .with_context(|| format!("request to {} failed after retries", url));
+                        .with_context(|| format!("request to {url} failed after retries"));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempts)));
             }
@@ -284,39 +284,21 @@ fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     None
 }
 
+/// Fetch SSH public keys for a GitHub user using environment-based options.
+///
+/// # Errors
+///
+/// Returns an error if the GitHub API request fails or the response is invalid.
 pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
     fetch_github_user_keys_with_options(username, &fetch_options_from_env()?, None)
 }
 
-pub fn fetch_github_user_keys_with_options(
+/// Paginate through the REST API for a user's keys, returning keys and metadata.
+fn rest_paginate_user_keys(
     username: &str,
     options: &GithubFetchOptions,
     if_none_match: Option<&str>,
-) -> Result<GithubUserKeys> {
-    let use_gh = match options.auth_mode {
-        GithubAuthMode::Auto => gh_installed(),
-        GithubAuthMode::Gh => {
-            if !gh_installed() {
-                bail!("github auth mode 'gh' requested but gh is not installed");
-            }
-            true
-        }
-        GithubAuthMode::Token | GithubAuthMode::Anonymous => false,
-    };
-
-    if use_gh {
-        let keys = gh_api_lines(&format!("users/{username}/keys"), ".[].key", true)?;
-        return Ok(GithubUserKeys {
-            username: username.to_string(),
-            url: github_web_keys_url(&options.web_base_url, username),
-            keys,
-            backend: GithubBackend::Gh,
-            authenticated: true,
-            auth_mode: options.auth_mode,
-            metadata: GithubFetchMetadata::default(),
-        });
-    }
-
+) -> Result<(Vec<String>, GithubFetchMetadata, bool)> {
     let client = reqwest::blocking::Client::builder()
         .build()
         .context("failed to build reqwest client")?;
@@ -329,20 +311,12 @@ pub fn fetch_github_user_keys_with_options(
     let mut applied_etag = false;
 
     while let Some(url) = next {
-        let current_if_none_match = if !applied_etag { if_none_match } else { None };
+        let current_if_none_match = if applied_etag { None } else { if_none_match };
         let resp = rest_get_with_retry(&client, &url, options.auth_mode, current_if_none_match)
             .with_context(|| format!("failed to fetch GitHub user keys for {username}"))?;
         if resp.status() == StatusCode::NOT_MODIFIED {
             metadata.not_modified = true;
-            return Ok(GithubUserKeys {
-                username: username.to_string(),
-                url: github_web_keys_url(&options.web_base_url, username),
-                keys: Vec::new(),
-                backend: GithubBackend::Rest,
-                authenticated: rest_authenticated(options.auth_mode),
-                auth_mode: options.auth_mode,
-                metadata,
-            });
+            return Ok((Vec::new(), metadata, true));
         }
         if options.private_source_hard_fail
             && (resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN)
@@ -357,15 +331,7 @@ pub fn fetch_github_user_keys_with_options(
                 || resp.status() == StatusCode::FORBIDDEN
                 || resp.status() == StatusCode::NOT_FOUND)
         {
-            return Ok(GithubUserKeys {
-                username: username.to_string(),
-                url: github_web_keys_url(&options.web_base_url, username),
-                keys: Vec::new(),
-                backend: GithubBackend::Rest,
-                authenticated: rest_authenticated(options.auth_mode),
-                auth_mode: options.auth_mode,
-                metadata,
-            });
+            return Ok((Vec::new(), metadata, false));
         }
 
         let headers = resp.headers().clone();
@@ -397,6 +363,47 @@ pub fn fetch_github_user_keys_with_options(
         next = parse_next_link(&headers);
     }
 
+    Ok((keys, metadata, false))
+}
+
+/// Fetch SSH public keys for a GitHub user with explicit options.
+///
+/// # Errors
+///
+/// Returns an error if the GitHub API request fails, the `gh` CLI is required
+/// but not installed, or the response cannot be parsed.
+pub fn fetch_github_user_keys_with_options(
+    username: &str,
+    options: &GithubFetchOptions,
+    if_none_match: Option<&str>,
+) -> Result<GithubUserKeys> {
+    let use_gh = match options.auth_mode {
+        GithubAuthMode::Auto => gh_installed(),
+        GithubAuthMode::Gh => {
+            if !gh_installed() {
+                bail!("github auth mode 'gh' requested but gh is not installed");
+            }
+            true
+        }
+        GithubAuthMode::Token | GithubAuthMode::Anonymous => false,
+    };
+
+    if use_gh {
+        let keys = gh_api_lines(&format!("users/{username}/keys"), ".[].key", true)?;
+        return Ok(GithubUserKeys {
+            username: username.to_string(),
+            url: github_web_keys_url(&options.web_base_url, username),
+            keys,
+            backend: GithubBackend::Gh,
+            authenticated: true,
+            auth_mode: options.auth_mode,
+            metadata: GithubFetchMetadata::default(),
+        });
+    }
+
+    let (keys, metadata, _early_return) =
+        rest_paginate_user_keys(username, options, if_none_match)?;
+
     Ok(GithubUserKeys {
         username: username.to_string(),
         url: github_web_keys_url(&options.web_base_url, username),
@@ -408,6 +415,11 @@ pub fn fetch_github_user_keys_with_options(
     })
 }
 
+/// Fetch members of a GitHub team using environment-based options.
+///
+/// # Errors
+///
+/// Returns an error if the GitHub API request fails or the response is invalid.
 pub fn fetch_github_team_members(
     org: &str,
     team: &str,
@@ -417,6 +429,12 @@ pub fn fetch_github_team_members(
     Ok((fetched.members, fetched.backend, fetched.authenticated))
 }
 
+/// Fetch members of a GitHub team with explicit options.
+///
+/// # Errors
+///
+/// Returns an error if the GitHub API request fails, the `gh` CLI is required
+/// but not installed, or the response cannot be parsed.
 pub fn fetch_github_team_members_with_options(
     org: &str,
     team: &str,
@@ -464,7 +482,7 @@ pub fn fetch_github_team_members_with_options(
     let mut applied_etag = false;
 
     while let Some(url) = next {
-        let current_if_none_match = if !applied_etag { if_none_match } else { None };
+        let current_if_none_match = if applied_etag { None } else { if_none_match };
         let resp = rest_get_with_retry(&client, &url, options.auth_mode, current_if_none_match)
             .with_context(|| format!("failed to fetch GitHub team members for {org}/{team}"))?;
 
@@ -536,6 +554,12 @@ pub fn wrapped_store_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git-sshripped").join("wrapped")
 }
 
+/// List all registered recipients for a repository.
+///
+/// # Errors
+///
+/// Returns an error if the recipient directory cannot be read or a recipient
+/// file cannot be parsed.
 pub fn list_recipients(repo_root: &Path) -> Result<Vec<RecipientKey>> {
     let dir = recipient_store_dir(repo_root);
     if !dir.exists() {
@@ -566,6 +590,12 @@ pub fn list_recipients(repo_root: &Path) -> Result<Vec<RecipientKey>> {
     Ok(recipients)
 }
 
+/// Add a recipient from an SSH public key line.
+///
+/// # Errors
+///
+/// Returns an error if the key line is empty, the key type is unsupported,
+/// or the recipient file cannot be written.
 pub fn add_recipient_from_public_key(
     repo_root: &Path,
     public_key_line: &str,
@@ -616,10 +646,21 @@ pub fn add_recipient_from_public_key(
     Ok(recipient)
 }
 
+/// Add recipients from a GitHub keys URL.
+///
+/// # Errors
+///
+/// Returns an error if the URL cannot be fetched or a key cannot be added.
 pub fn add_recipients_from_github_keys(repo_root: &Path, url: &str) -> Result<Vec<RecipientKey>> {
     add_recipients_from_github_source(repo_root, url, None)
 }
 
+/// Add recipients from a GitHub username using environment-based options.
+///
+/// # Errors
+///
+/// Returns an error if the user's keys cannot be fetched or a key cannot be
+/// added.
 pub fn add_recipients_from_github_username(
     repo_root: &Path,
     username: &str,
@@ -631,6 +672,12 @@ pub fn add_recipients_from_github_username(
     )
 }
 
+/// Add recipients from a GitHub username with explicit options.
+///
+/// # Errors
+///
+/// Returns an error if the user's keys cannot be fetched or a key cannot be
+/// added.
 pub fn add_recipients_from_github_username_with_options(
     repo_root: &Path,
     username: &str,
@@ -653,10 +700,15 @@ pub fn add_recipients_from_github_username_with_options(
     Ok(added)
 }
 
+/// Add recipients from a GitHub source URL or username.
+///
+/// # Errors
+///
+/// Returns an error if the source cannot be fetched or a key cannot be added.
 pub fn add_recipients_from_github_source(
     repo_root: &Path,
     url: &str,
-    username: Option<String>,
+    username: Option<&str>,
 ) -> Result<Vec<RecipientKey>> {
     add_recipients_from_github_source_with_options(
         repo_root,
@@ -666,13 +718,18 @@ pub fn add_recipients_from_github_source(
     )
 }
 
+/// Add recipients from a GitHub source with explicit options.
+///
+/// # Errors
+///
+/// Returns an error if the source cannot be fetched or a key cannot be added.
 pub fn add_recipients_from_github_source_with_options(
     repo_root: &Path,
     url: &str,
-    username: Option<String>,
+    username: Option<&str>,
     options: &GithubFetchOptions,
 ) -> Result<Vec<RecipientKey>> {
-    if let Some(user) = username.as_deref() {
+    if let Some(user) = username {
         return add_recipients_from_github_username_with_options(repo_root, user, options);
     }
 
@@ -695,7 +752,7 @@ pub fn add_recipients_from_github_source_with_options(
             line,
             RecipientSource::GithubKeys {
                 url: url.to_string(),
-                username: username.clone(),
+                username: username.map(ToString::to_string),
             },
         )
         .with_context(|| format!("failed to add recipient from key line '{line}'"))?;
@@ -705,6 +762,11 @@ pub fn add_recipients_from_github_source_with_options(
     Ok(added)
 }
 
+/// Remove recipients by their fingerprints.
+///
+/// # Errors
+///
+/// Returns an error if a recipient or wrapped key file cannot be removed.
 pub fn remove_recipients_by_fingerprints(
     repo_root: &Path,
     fingerprints: &[String],
@@ -718,6 +780,12 @@ pub fn remove_recipients_by_fingerprints(
     Ok(removed)
 }
 
+/// Wrap the repo key for a single recipient using age encryption.
+///
+/// # Errors
+///
+/// Returns an error if the public key is invalid, age encryption fails, or
+/// the wrapped key file cannot be written.
 pub fn wrap_repo_key_for_recipient(
     repo_root: &Path,
     recipient: &RecipientKey,
@@ -754,6 +822,12 @@ pub fn wrap_repo_key_for_recipient(
     Ok(wrapped_file)
 }
 
+/// Wrap the repo key for all registered recipients.
+///
+/// # Errors
+///
+/// Returns an error if no recipients are configured, or if wrapping fails
+/// for any recipient.
 pub fn wrap_repo_key_for_all_recipients(repo_root: &Path, repo_key: &[u8]) -> Result<Vec<PathBuf>> {
     let recipients = list_recipients(repo_root)?;
     if recipients.is_empty() {
@@ -768,25 +842,33 @@ pub fn wrap_repo_key_for_all_recipients(repo_root: &Path, repo_key: &[u8]) -> Re
     Ok(wrapped_files)
 }
 
+/// Remove a single recipient and its wrapped key by fingerprint.
+///
+/// # Errors
+///
+/// Returns an error if a file exists but cannot be removed.
 pub fn remove_recipient_by_fingerprint(repo_root: &Path, fingerprint: &str) -> Result<bool> {
     let recipient_file = recipient_store_dir(repo_root).join(format!("{fingerprint}.toml"));
     let wrapped_file = wrapped_store_dir(repo_root).join(format!("{fingerprint}.age"));
 
-    let mut removed_any = false;
-    if recipient_file.exists() {
+    let removed_recipient = if recipient_file.exists() {
         fs::remove_file(&recipient_file).with_context(|| {
             format!(
                 "failed to remove recipient file {}",
                 recipient_file.display()
             )
         })?;
-        removed_any = true;
-    }
-    if wrapped_file.exists() {
+        true
+    } else {
+        false
+    };
+    let removed_wrapped = if wrapped_file.exists() {
         fs::remove_file(&wrapped_file)
             .with_context(|| format!("failed to remove wrapped file {}", wrapped_file.display()))?;
-        removed_any = true;
-    }
+        true
+    } else {
+        false
+    };
 
-    Ok(removed_any)
+    Ok(removed_recipient || removed_wrapped)
 }

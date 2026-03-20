@@ -6,6 +6,7 @@ edition = { workspace = true }
 keywords = ["cli", "git", "ssh"]
 license = { workspace = true }
 name = "git_sshripped_cli"
+readme = "README.md"
 repository = { workspace = true }
 version = { workspace = true }
 
@@ -27,7 +28,9 @@ git_sshripped_recipient_models = { workspace = true }
 git_sshripped_repository = { workspace = true }
 git_sshripped_repository_models = { workspace = true }
 git_sshripped_ssh_identity = { workspace = true }
+git_sshripped_ssh_identity_models = { workspace = true }
 git_sshripped_worktree = { workspace = true }
+git_sshripped_worktree_models = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["derive", "std"] }

@@ -6,6 +6,7 @@ edition.workspace = true
 keywords = ["cli", "git", "ssh"]
 license.workspace = true
 name = "git_sshript"
+readme = "README.md"
 repository.workspace = true
 version.workspace = true
 

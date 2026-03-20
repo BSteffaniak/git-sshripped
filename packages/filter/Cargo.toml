@@ -6,6 +6,7 @@ edition = { workspace = true }
 keywords = ["clean", "filter", "smudge"]
 license = { workspace = true }
 name = "git_sshripped_filter"
+readme = "README.md"
 repository = { workspace = true }
 version = { workspace = true }
 

@@ -35,9 +35,11 @@ use git_sshripped_ssh_identity::{
     private_keys_matching_agent, unwrap_repo_key_from_wrapped_files,
     unwrap_repo_key_with_agent_helper, well_known_public_key_paths,
 };
+use git_sshripped_ssh_identity_models::IdentityDescriptor;
 use git_sshripped_worktree::{
     clear_unlock_session, git_common_dir, git_toplevel, read_unlock_session, write_unlock_session,
 };
+use git_sshripped_worktree_models::UnlockSession;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -302,10 +304,40 @@ enum Command {
     },
 }
 
+#[allow(clippy::struct_excessive_bools)]
+struct RevokeUserOptions {
+    fingerprint: Option<String>,
+    github_user: Option<String>,
+    org: Option<String>,
+    team: Option<String>,
+    all_keys_for_user: bool,
+    force: bool,
+    auto_reencrypt: bool,
+    json: bool,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct MigrateOptions {
+    dry_run: bool,
+    reencrypt: bool,
+    verify: bool,
+    json: bool,
+    write_report: Option<String>,
+}
+
+/// Run the CLI, dispatching to the appropriate subcommand.
+///
+/// # Errors
+///
+/// Returns an error if the subcommand fails for any reason (invalid input,
+/// I/O failure, Git operation failure, etc.).
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    dispatch_command(cli.command)
+}
 
-    match cli.command {
+fn dispatch_command(command: Command) -> Result<()> {
+    match command {
         Command::Init {
             patterns,
             algorithm,
@@ -313,7 +345,7 @@ pub fn run() -> Result<()> {
             github_keys_urls,
             strict,
         } => cmd_init(
-            patterns,
+            &patterns,
             algorithm,
             recipient_keys,
             github_keys_urls,
@@ -338,6 +370,43 @@ pub fn run() -> Result<()> {
             github_user,
         } => cmd_add_user(key, github_keys_url, github_user),
         Command::ListUsers { verbose } => cmd_list_users(verbose),
+        Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
+        Command::RevokeUser {
+            fingerprint,
+            github_user,
+            org,
+            team,
+            all_keys_for_user,
+            force,
+            auto_reencrypt,
+            json,
+        } => cmd_revoke_user(&RevokeUserOptions {
+            fingerprint,
+            github_user,
+            org,
+            team,
+            all_keys_for_user,
+            force,
+            auto_reencrypt,
+            json,
+        }),
+        Command::Install => cmd_install(),
+        Command::ExportRepoKey { out } => cmd_export_repo_key(&out),
+        Command::ImportRepoKey { input } => cmd_import_repo_key(&input),
+        Command::Verify { strict, json } => cmd_verify(strict, json),
+        Command::Clean { path } => cmd_clean(&path),
+        Command::Smudge { path } => cmd_smudge(&path),
+        Command::Diff { path, file } => cmd_diff(&path, file.as_deref()),
+        Command::FilterProcess => cmd_filter_process(),
+        Command::Policy { command } => cmd_policy(command),
+        Command::Config { command } => cmd_config(command),
+        Command::AccessAudit { identities, json } => cmd_access_audit(identities, json),
+        cmd => dispatch_github_command(cmd),
+    }
+}
+
+fn dispatch_github_command(command: Command) -> Result<()> {
+    match command {
         Command::AddGithubUser {
             username,
             auto_wrap,
@@ -353,7 +422,7 @@ pub fn run() -> Result<()> {
             dry_run,
             fail_on_drift,
             json,
-        } => cmd_refresh_github_keys(username, dry_run, fail_on_drift, json),
+        } => cmd_refresh_github_keys(username.as_deref(), dry_run, fail_on_drift, json),
         Command::AddGithubTeam {
             org,
             team,
@@ -368,45 +437,27 @@ pub fn run() -> Result<()> {
             dry_run,
             fail_on_drift,
             json,
-        } => cmd_refresh_github_teams(org, team, dry_run, fail_on_drift, json),
-        Command::AccessAudit { identities, json } => cmd_access_audit(identities, json),
-        Command::RemoveUser { fingerprint, force } => cmd_remove_user(&fingerprint, force),
-        Command::RevokeUser {
-            fingerprint,
-            github_user,
-            org,
-            team,
-            all_keys_for_user,
-            force,
-            auto_reencrypt,
-            json,
-        } => cmd_revoke_user(
-            fingerprint,
-            github_user,
-            org,
-            team,
-            all_keys_for_user,
-            force,
-            auto_reencrypt,
+        } => cmd_refresh_github_teams(
+            org.as_deref(),
+            team.as_deref(),
+            dry_run,
+            fail_on_drift,
             json,
         ),
-        Command::Install => cmd_install(),
         Command::MigrateFromGitCrypt {
             dry_run,
             reencrypt,
             verify,
             json,
             write_report,
-        } => cmd_migrate_from_git_crypt(dry_run, reencrypt, verify, json, write_report),
-        Command::ExportRepoKey { out } => cmd_export_repo_key(&out),
-        Command::ImportRepoKey { input } => cmd_import_repo_key(&input),
-        Command::Verify { strict, json } => cmd_verify(strict, json),
-        Command::Clean { path } => cmd_clean(&path),
-        Command::Smudge { path } => cmd_smudge(&path),
-        Command::Diff { path, file } => cmd_diff(&path, file.as_deref()),
-        Command::FilterProcess => cmd_filter_process(),
-        Command::Policy { command } => cmd_policy(command),
-        Command::Config { command } => cmd_config(command),
+        } => cmd_migrate_from_git_crypt(&MigrateOptions {
+            dry_run,
+            reencrypt,
+            verify,
+            json,
+            write_report,
+        }),
+        _ => unreachable!(),
     }
 }
 
@@ -633,7 +684,7 @@ fn github_fetch_options(repo_root: &std::path::Path) -> Result<GithubFetchOption
     Ok(options)
 }
 
-fn github_auth_mode_label(mode: GithubAuthMode) -> &'static str {
+const fn github_auth_mode_label(mode: GithubAuthMode) -> &'static str {
     match mode {
         GithubAuthMode::Auto => "auto",
         GithubAuthMode::Gh => "gh",
@@ -694,8 +745,10 @@ fn enforce_allowed_key_types_for_added_recipients(
         let key_type = added
             .iter()
             .find(|recipient| recipient.fingerprint == fingerprint)
-            .map(|recipient| recipient.key_type.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+            .map_or_else(
+                || "unknown".to_string(),
+                |recipient| recipient.key_type.clone(),
+            );
         format!("{fingerprint} ({key_type})")
     }));
 
@@ -810,49 +863,74 @@ fn collect_doctor_failures(
     }
 
     if let Some(max_hours) = manifest.max_source_staleness_hours {
-        let registry = read_github_sources(repo_root)?;
-        let max_age_secs = max_hours.saturating_mul(3600);
-        let now = now_unix();
-        for user in &registry.users {
-            if user.last_refreshed_unix == 0 {
-                failures.push(format!(
-                    "github user source {} has never been refreshed",
-                    user.username
-                ));
-                continue;
-            }
-            let age = now.saturating_sub(user.last_refreshed_unix);
-            if age > max_age_secs {
-                failures.push(format!(
-                    "github user source {} is stale ({}s > {}s)",
-                    user.username, age, max_age_secs
-                ));
-            }
-        }
-        for team in &registry.teams {
-            if team.last_refreshed_unix == 0 {
-                failures.push(format!(
-                    "github team source {}/{} has never been refreshed",
-                    team.org, team.team
-                ));
-                continue;
-            }
-            let age = now.saturating_sub(team.last_refreshed_unix);
-            if age > max_age_secs {
-                failures.push(format!(
-                    "github team source {}/{} is stale ({}s > {}s)",
-                    team.org, team.team, age, max_age_secs
-                ));
-            }
-        }
+        failures.extend(check_source_staleness_failures(repo_root, max_hours)?);
     }
 
+    failures.extend(check_wrapped_key_and_session_failures(
+        repo_root,
+        common_dir,
+        manifest,
+        &recipients,
+    )?);
+
+    Ok(failures)
+}
+
+fn check_source_staleness_failures(
+    repo_root: &std::path::Path,
+    max_hours: u64,
+) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
+    let registry = read_github_sources(repo_root)?;
+    let max_age_secs = max_hours.saturating_mul(3600);
+    let now = now_unix();
+    for user in &registry.users {
+        if user.last_refreshed_unix == 0 {
+            failures.push(format!(
+                "github user source {} has never been refreshed",
+                user.username
+            ));
+            continue;
+        }
+        let age = now.saturating_sub(user.last_refreshed_unix);
+        if age > max_age_secs {
+            failures.push(format!(
+                "github user source {} is stale ({}s > {}s)",
+                user.username, age, max_age_secs
+            ));
+        }
+    }
+    for team in &registry.teams {
+        if team.last_refreshed_unix == 0 {
+            failures.push(format!(
+                "github team source {}/{} has never been refreshed",
+                team.org, team.team
+            ));
+            continue;
+        }
+        let age = now.saturating_sub(team.last_refreshed_unix);
+        if age > max_age_secs {
+            failures.push(format!(
+                "github team source {}/{} is stale ({}s > {}s)",
+                team.org, team.team, age, max_age_secs
+            ));
+        }
+    }
+    Ok(failures)
+}
+
+fn check_wrapped_key_and_session_failures(
+    repo_root: &std::path::Path,
+    common_dir: &std::path::Path,
+    manifest: &RepositoryManifest,
+    recipients: &[RecipientKey],
+) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
     let wrapped_files = wrapped_key_files(repo_root)?;
     if wrapped_files.is_empty() {
         failures.push("no wrapped keys found".to_string());
     }
-
-    for recipient in &recipients {
+    for recipient in recipients {
         let wrapped = wrapped_store_dir(repo_root).join(format!("{}.age", recipient.fingerprint));
         if !wrapped.exists() {
             failures.push(format!(
@@ -861,7 +939,6 @@ fn collect_doctor_failures(
             ));
         }
     }
-
     if let Some(session) = read_unlock_session(common_dir)? {
         let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
             .decode(session.key_b64)
@@ -872,25 +949,21 @@ fn collect_doctor_failures(
                 decoded.len()
             ));
         }
-
         if let Some(expected) = &manifest.repo_key_id {
             let actual = repo_key_id_from_bytes(&decoded);
             if &actual != expected {
                 failures.push(format!(
-                    "unlock session repo key mismatch: expected {}, got {}",
-                    expected, actual
+                    "unlock session repo key mismatch: expected {expected}, got {actual}"
                 ));
             }
             if session.repo_key_id.as_deref() != Some(expected.as_str()) {
                 failures.push(format!(
-                    "unlock session metadata repo_key_id mismatch: expected {}, got {}",
-                    expected,
+                    "unlock session metadata repo_key_id mismatch: expected {expected}, got {}",
                     session.repo_key_id.as_deref().unwrap_or("missing")
                 ));
             }
         }
     }
-
     Ok(failures)
 }
 
@@ -918,7 +991,7 @@ fn fingerprint_in_other_sources(
 }
 
 fn cmd_init(
-    patterns: Vec<String>,
+    patterns: &[String],
     algorithm: CliAlgorithm,
     recipient_keys: Vec<String>,
     github_keys_urls: Vec<String>,
@@ -940,13 +1013,16 @@ fn cmd_init(
     };
 
     write_manifest(&repo_root, &manifest)?;
-    install_gitattributes(&repo_root, &patterns)?;
+    install_gitattributes(&repo_root, patterns)?;
     install_git_filters(&repo_root, &current_bin_path())?;
 
     let mut added_recipients = Vec::new();
 
     for key in recipient_keys {
-        let key_line = if key.ends_with(".pub") {
+        let key_line = if std::path::Path::new(&key)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+        {
             fs::read_to_string(&key)
                 .with_context(|| format!("failed to read recipient key file {key}"))?
         } else {
@@ -1003,7 +1079,7 @@ fn cmd_init(
     println!("strict_mode: {}", manifest.strict_mode);
     println!("patterns: {}", patterns.join(", "));
     println!("recipients: {}", recipients.len());
-    println!("wrapped keys written: {}", wrapped_count);
+    println!("wrapped keys written: {wrapped_count}");
     if added_recipients.is_empty() && !recipients.is_empty() {
         println!("note: reused existing recipient definitions");
     }
@@ -1018,6 +1094,89 @@ fn cmd_init(
     Ok(())
 }
 
+fn unwrap_repo_key_from_identities(
+    repo_root: &std::path::Path,
+    identities: Vec<String>,
+    github_user: Option<String>,
+    prefer_agent: bool,
+    no_agent: bool,
+) -> Result<(Vec<u8>, String)> {
+    let explicit_identities: Vec<PathBuf> = identities.into_iter().map(PathBuf::from).collect();
+    let interactive_set: std::collections::HashSet<PathBuf> =
+        explicit_identities.iter().cloned().collect();
+    let mut identity_files = Vec::new();
+
+    if !no_agent {
+        let mut agent_matches = private_keys_matching_agent()?;
+        identity_files.append(&mut agent_matches);
+    }
+
+    if explicit_identities.is_empty() {
+        identity_files.extend(default_private_key_candidates());
+    } else if prefer_agent {
+        identity_files.extend(explicit_identities);
+    } else {
+        let mut merged = explicit_identities;
+        merged.extend(identity_files);
+        identity_files = merged;
+    }
+
+    identity_files.sort();
+    identity_files.dedup();
+
+    let mut wrapped_files = wrapped_key_files(repo_root)?;
+    if let Some(user) = github_user {
+        let recipients = list_recipients(repo_root)?;
+        let allowed: std::collections::HashSet<String> = recipients
+            .iter()
+            .filter_map(|recipient| match &recipient.source {
+                RecipientSource::GithubKeys { username, .. }
+                    if username.as_deref() == Some(&user) =>
+                {
+                    Some(format!("{}.age", recipient.fingerprint))
+                }
+                _ => None,
+            })
+            .collect();
+        wrapped_files.retain(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| allowed.contains(name))
+        });
+    }
+    if wrapped_files.is_empty() {
+        anyhow::bail!(
+            "no wrapped key files found in {}; run init or rewrap first",
+            wrapped_store_dir(repo_root).display()
+        );
+    }
+
+    let resolved_helper = if no_agent {
+        None
+    } else {
+        resolve_agent_helper(repo_root)?
+    };
+
+    if let Some((helper_path, source)) = resolved_helper
+        && let Some((unwrapped, descriptor)) =
+            unwrap_repo_key_with_agent_helper(&wrapped_files, &helper_path, 3000)?
+    {
+        Ok((
+            unwrapped,
+            format!("agent-helper[{source}]: {}", descriptor.label),
+        ))
+    } else {
+        let Some((unwrapped, descriptor)) =
+            unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files, &interactive_set)?
+        else {
+            anyhow::bail!(
+                "could not decrypt any wrapped key with agent helper or provided identity files; set GSC_SSH_AGENT_HELPER for true ssh-agent decrypt, or pass --identity"
+            );
+        };
+        Ok((unwrapped, descriptor.label))
+    }
+}
+
 fn cmd_unlock(
     key_hex: Option<String>,
     identities: Vec<String>,
@@ -1030,12 +1189,12 @@ fn cmd_unlock(
     let mut manifest = read_manifest(&repo_root)?;
 
     // If there is already a valid unlock session, skip the expensive key-unwrap path.
-    if key_hex.is_none() {
-        if let Ok(Some(_)) = repo_key_from_session_in(&common_dir, Some(&manifest)) {
-            install_git_filters(&repo_root, &current_bin_path())?;
-            println!("repository is already unlocked");
-            return Ok(());
-        }
+    if key_hex.is_none()
+        && let Ok(Some(_)) = repo_key_from_session_in(&common_dir, Some(&manifest))
+    {
+        install_git_filters(&repo_root, &current_bin_path())?;
+        println!("repository is already unlocked");
+        return Ok(());
     }
 
     let (key, key_source) = if let Some(hex_value) = key_hex {
@@ -1044,94 +1203,20 @@ fn cmd_unlock(
             "key-hex".to_string(),
         )
     } else {
-        let explicit_identities: Vec<PathBuf> = identities.into_iter().map(PathBuf::from).collect();
-        let interactive_set: std::collections::HashSet<PathBuf> =
-            explicit_identities.iter().cloned().collect();
-        let mut identity_files = Vec::new();
-
-        if !no_agent {
-            let mut agent_matches = private_keys_matching_agent()?;
-            identity_files.append(&mut agent_matches);
-        }
-
-        if !explicit_identities.is_empty() {
-            if prefer_agent {
-                identity_files.extend(explicit_identities);
-            } else {
-                let mut merged = explicit_identities;
-                merged.extend(identity_files);
-                identity_files = merged;
-            }
-        } else {
-            identity_files.extend(default_private_key_candidates());
-        }
-
-        identity_files.sort();
-        identity_files.dedup();
-
-        let mut wrapped_files = wrapped_key_files(&repo_root)?;
-        if let Some(user) = github_user {
-            let recipients = list_recipients(&repo_root)?;
-            let allowed: std::collections::HashSet<String> = recipients
-                .iter()
-                .filter_map(|recipient| match &recipient.source {
-                    RecipientSource::GithubKeys { username, .. }
-                        if username.as_deref() == Some(&user) =>
-                    {
-                        Some(format!("{}.age", recipient.fingerprint))
-                    }
-                    _ => None,
-                })
-                .collect();
-            wrapped_files.retain(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| allowed.contains(name))
-            });
-        }
-        if wrapped_files.is_empty() {
-            anyhow::bail!(
-                "no wrapped key files found in {}; run init or rewrap first",
-                wrapped_store_dir(&repo_root).display()
-            );
-        }
-
-        let resolved_helper = if no_agent {
-            None
-        } else {
-            resolve_agent_helper(&repo_root)?
-        };
-
-        if let Some((helper_path, source)) = resolved_helper
-            && let Some((unwrapped, descriptor)) =
-                unwrap_repo_key_with_agent_helper(&wrapped_files, &helper_path, 3000)?
-        {
-            (
-                unwrapped,
-                format!("agent-helper[{source}]: {}", descriptor.label),
-            )
-        } else {
-            let Some((unwrapped, descriptor)) = unwrap_repo_key_from_wrapped_files(
-                &wrapped_files,
-                &identity_files,
-                &interactive_set,
-            )?
-            else {
-                anyhow::bail!(
-                    "could not decrypt any wrapped key with agent helper or provided identity files; set GSC_SSH_AGENT_HELPER for true ssh-agent decrypt, or pass --identity"
-                );
-            };
-            (unwrapped, descriptor.label)
-        }
+        unwrap_repo_key_from_identities(
+            &repo_root,
+            identities,
+            github_user,
+            prefer_agent,
+            no_agent,
+        )?
     };
 
     let key_id = repo_key_id_from_bytes(&key);
     if let Some(expected) = &manifest.repo_key_id {
         if expected != &key_id {
             anyhow::bail!(
-                "unlock failed: derived repo key does not match manifest repo_key_id; expected {}, got {}; run from the correct branch/worktree or re-import/rotate key",
-                expected,
-                key_id
+                "unlock failed: derived repo key does not match manifest repo_key_id; expected {expected}, got {key_id}; run from the correct branch/worktree or re-import/rotate key"
             );
         }
     } else {
@@ -1142,32 +1227,7 @@ fn cmd_unlock(
     write_unlock_session(&common_dir, &key, &key_source, Some(key_id))?;
     install_git_filters(&repo_root, &current_bin_path())?;
 
-    let mut decrypted_count = 0usize;
-    if let Ok(protected) = protected_tracked_files(&repo_root) {
-        if !protected.is_empty() {
-            println!(
-                "decrypting {} protected files in working tree...",
-                protected.len()
-            );
-        }
-        for path in &protected {
-            let full = repo_root.join(path);
-            if let Ok(content) = fs::read(&full) {
-                if content.starts_with(&ENCRYPTED_MAGIC) {
-                    match git_sshripped_encryption::decrypt(&key, path, &content) {
-                        Ok(plaintext) => {
-                            if fs::write(&full, &plaintext).is_ok() {
-                                decrypted_count += 1;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("warning: failed to decrypt {path}: {e}");
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let decrypted_count = decrypt_protected_worktree_files(&repo_root, &key);
 
     println!(
         "unlocked repository across worktrees via {}",
@@ -1177,6 +1237,36 @@ fn cmd_unlock(
         println!("decrypted {decrypted_count} protected files in working tree");
     }
     Ok(())
+}
+
+fn decrypt_protected_worktree_files(repo_root: &std::path::Path, key: &[u8]) -> usize {
+    let mut decrypted_count = 0usize;
+    if let Ok(protected) = protected_tracked_files(repo_root) {
+        if !protected.is_empty() {
+            println!(
+                "decrypting {} protected files in working tree...",
+                protected.len()
+            );
+        }
+        for path in &protected {
+            let full = repo_root.join(path);
+            if let Ok(content) = fs::read(&full)
+                && content.starts_with(&ENCRYPTED_MAGIC)
+            {
+                match git_sshripped_encryption::decrypt(key, path, &content) {
+                    Ok(plaintext) => {
+                        if fs::write(&full, &plaintext).is_ok() {
+                            decrypted_count += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to decrypt {path}: {e}");
+                    }
+                }
+            }
+        }
+    }
+    decrypted_count
 }
 
 fn cmd_lock(force: bool, no_scrub: bool) -> Result<()> {
@@ -1250,15 +1340,12 @@ fn cmd_status(json: bool) -> Result<()> {
     let helper = resolve_agent_helper(&repo_root)?;
     let protected_count = protected_tracked_files(&repo_root)?.len();
     let drift_count = verify_failures(&repo_root)?.len();
-    let session_matches_manifest = if let Some(s) = session.as_ref() {
-        if let Some(expected) = manifest.repo_key_id.as_ref() {
-            s.repo_key_id.as_deref() == Some(expected.as_str())
-        } else {
-            true
-        }
-    } else {
-        true
-    };
+    let session_matches_manifest = session.as_ref().is_none_or(|s| {
+        manifest
+            .repo_key_id
+            .as_ref()
+            .is_none_or(|expected| s.repo_key_id.as_deref() == Some(expected.as_str()))
+    });
 
     if json {
         let payload = serde_json::json!({
@@ -1289,6 +1376,36 @@ fn cmd_status(json: bool) -> Result<()> {
         return Ok(());
     }
 
+    print_status_text(
+        &repo_root,
+        &common_dir,
+        &manifest,
+        &identity,
+        session,
+        &recipients,
+        &wrapped_files,
+        helper,
+        protected_count,
+        drift_count,
+        session_matches_manifest,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_status_text(
+    repo_root: &std::path::Path,
+    common_dir: &std::path::Path,
+    manifest: &RepositoryManifest,
+    identity: &IdentityDescriptor,
+    session: Option<UnlockSession>,
+    recipients: &[RecipientKey],
+    wrapped_files: &[PathBuf],
+    helper: Option<(PathBuf, String)>,
+    protected_count: usize,
+    drift_count: usize,
+    session_matches_manifest: bool,
+) {
     println!("repo: {}", repo_root.display());
     println!(
         "state: {}",
@@ -1327,8 +1444,8 @@ fn cmd_status(json: bool) -> Result<()> {
     println!("identity: {} ({:?})", identity.label, identity.source);
     println!("recipients: {}", recipients.len());
     println!("wrapped keys: {}", wrapped_files.len());
-    println!("protected tracked files: {}", protected_count);
-    println!("drift failures: {}", drift_count);
+    println!("protected tracked files: {protected_count}");
+    println!("drift failures: {drift_count}");
     if let Some(session) = session {
         println!("unlock source: {}", session.key_source);
         println!(
@@ -1345,9 +1462,8 @@ fn cmd_status(json: bool) -> Result<()> {
     }
     println!(
         "protected patterns: {}",
-        read_gitattributes_patterns(&repo_root).join(", ")
+        read_gitattributes_patterns(repo_root).join(", ")
     );
-    Ok(())
 }
 
 fn cmd_add_user(
@@ -1392,7 +1508,10 @@ fn cmd_add_user(
     }
 
     if let Some(key_input) = key {
-        let key_line = if key_input.ends_with(".pub") {
+        let key_line = if std::path::Path::new(&key_input)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+        {
             fs::read_to_string(&key_input)
                 .with_context(|| format!("failed to read key file {key_input}"))?
         } else {
@@ -1428,7 +1547,7 @@ fn cmd_add_user(
             wrap_repo_key_for_recipient(&repo_root, recipient, &key)?;
             wrapped_count += 1;
         }
-        println!("wrapped repo key for {} new recipients", wrapped_count);
+        println!("wrapped repo key for {wrapped_count} new recipients");
     } else {
         println!(
             "warning: repository is locked; run `git-sshripped unlock` then `git-sshripped rewrap` to grant access"
@@ -1500,130 +1619,134 @@ fn cmd_remove_user(fingerprint: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_revoke_user(
-    fingerprint: Option<String>,
-    github_user: Option<String>,
-    org: Option<String>,
-    team: Option<String>,
-    all_keys_for_user: bool,
+fn revoke_github_user_all_keys(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    username: &str,
+    registry: &GithubSourceRegistry,
     force: bool,
-    auto_reencrypt: bool,
-    json: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let user_fingerprints: Vec<String> = list_recipients(repo_root)?
+        .into_iter()
+        .filter_map(|recipient| {
+            if let RecipientSource::GithubKeys {
+                username: Some(ref u),
+                ..
+            } = recipient.source
+                && *u == username
+            {
+                return Some(recipient.fingerprint);
+            }
+            None
+        })
+        .collect();
+    if user_fingerprints.is_empty() {
+        anyhow::bail!("no recipient keys found for github user {username}");
+    }
+    let recipients_count = list_recipients(repo_root)?.len();
+    let would_remove = user_fingerprints
+        .iter()
+        .filter(|fp| !fingerprint_in_other_sources(registry, fp, Some(username), None))
+        .count();
+    enforce_min_recipients(
+        manifest,
+        recipients_count.saturating_sub(would_remove),
+        "revoke-user",
+    )?;
+
+    let mut removed = Vec::new();
+    for fp in &user_fingerprints {
+        if !fingerprint_in_other_sources(registry, fp, Some(username), None) {
+            let _ = remove_recipient_by_fingerprint(repo_root, fp)?;
+            removed.push(fp.clone());
+        }
+    }
+
+    let mut updated_registry = registry.clone();
+    updated_registry
+        .users
+        .retain(|entry| entry.username != username);
+    write_github_sources(repo_root, &updated_registry)?;
+    let _ = force;
+    Ok(removed)
+}
+
+fn cmd_revoke_user(opts: &RevokeUserOptions) -> Result<()> {
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
     enforce_verify_clean_for_sensitive_actions(&repo_root, &manifest, "revoke-user")?;
     let mut removed_fingerprints = Vec::new();
 
-    let selectors = usize::from(fingerprint.is_some())
-        + usize::from(github_user.is_some())
-        + usize::from(org.is_some() || team.is_some());
+    let selectors = usize::from(opts.fingerprint.is_some())
+        + usize::from(opts.github_user.is_some())
+        + usize::from(opts.org.is_some() || opts.team.is_some());
     if selectors != 1 {
         anyhow::bail!(
             "revoke-user requires exactly one selector: --fingerprint, --github-user, or --org/--team"
         );
     }
-    if org.is_some() != team.is_some() {
+    if opts.org.is_some() != opts.team.is_some() {
         anyhow::bail!("--org and --team must be specified together");
     }
 
-    let target = if let Some(fingerprint) = fingerprint {
-        cmd_remove_user(&fingerprint, force)?;
+    let target = if let Some(fingerprint) = &opts.fingerprint {
+        cmd_remove_user(fingerprint, opts.force)?;
         removed_fingerprints.push(fingerprint.clone());
         format!("fingerprint:{fingerprint}")
-    } else if let Some(username) = github_user {
+    } else if let Some(username) = &opts.github_user {
         let registry = read_github_sources(&repo_root)?;
-        if all_keys_for_user {
-            let user_fingerprints: Vec<String> = list_recipients(&repo_root)?
-                .into_iter()
-                .filter_map(|recipient| {
-                    if let RecipientSource::GithubKeys {
-                        username: Some(ref u),
-                        ..
-                    } = recipient.source
-                        && *u == username
-                    {
-                        return Some(recipient.fingerprint);
-                    }
-                    None
-                })
-                .collect();
-            if user_fingerprints.is_empty() {
-                anyhow::bail!("no recipient keys found for github user {username}");
-            }
-            let recipients_count = list_recipients(&repo_root)?.len();
-            let would_remove = user_fingerprints
-                .iter()
-                .filter(|fp| !fingerprint_in_other_sources(&registry, fp, Some(&username), None))
-                .count();
-            enforce_min_recipients(
-                &manifest,
-                recipients_count.saturating_sub(would_remove),
-                "revoke-user",
+        if opts.all_keys_for_user {
+            removed_fingerprints = revoke_github_user_all_keys(
+                &repo_root, &manifest, username, &registry, opts.force,
             )?;
-
-            for fp in &user_fingerprints {
-                if !fingerprint_in_other_sources(&registry, fp, Some(&username), None) {
-                    let _ = remove_recipient_by_fingerprint(&repo_root, fp)?;
-                    removed_fingerprints.push(fp.clone());
-                }
-            }
-
-            let mut updated_registry = registry;
-            updated_registry
-                .users
-                .retain(|entry| entry.username != username);
-            write_github_sources(&repo_root, &updated_registry)?;
         } else {
             let source = registry
                 .users
                 .iter()
-                .find(|entry| entry.username == username)
+                .find(|entry| entry.username == *username)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("github user source not found: {username}"))?;
             removed_fingerprints = source.fingerprints;
-            cmd_remove_github_user(&username, force)?;
+            cmd_remove_github_user(username, opts.force)?;
         }
         format!("github-user:{username}")
     } else {
-        let Some(org) = org else {
+        let Some(org) = &opts.org else {
             anyhow::bail!("--org is required with --team")
         };
-        let Some(team) = team else {
+        let Some(team) = &opts.team else {
             anyhow::bail!("--team is required with --org")
         };
         let registry = read_github_sources(&repo_root)?;
         let source = registry
             .teams
             .iter()
-            .find(|entry| entry.org == org && entry.team == team)
+            .find(|entry| entry.org == *org && entry.team == *team)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("github team source not found: {org}/{team}"))?;
         removed_fingerprints = source.fingerprints;
-        cmd_remove_github_team(&org, &team)?;
+        cmd_remove_github_team(org, team)?;
         format!("github-team:{org}/{team}")
     };
 
-    let mut refreshed = 0usize;
-    if auto_reencrypt {
-        refreshed = reencrypt_with_current_session(&repo_root)?;
-    }
-    if json {
+    let refreshed = if opts.auto_reencrypt {
+        reencrypt_with_current_session(&repo_root)?
+    } else {
+        0usize
+    };
+    if opts.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "ok": true,
                 "target": target,
                 "removed_fingerprints": removed_fingerprints,
-                "auto_reencrypt": auto_reencrypt,
+                "auto_reencrypt": opts.auto_reencrypt,
                 "reencrypted_files": refreshed,
             }))?
         );
-    } else if auto_reencrypt {
-        println!(
-            "revoke-user: auto-reencrypt refreshed {} protected files",
-            refreshed
-        );
+    } else if opts.auto_reencrypt {
+        println!("revoke-user: auto-reencrypt refreshed {refreshed} protected files");
     } else {
         println!("revoke-user: run `git-sshripped reencrypt` and commit to complete offboarding");
     }
@@ -1685,50 +1808,8 @@ fn cmd_add_github_user(
         fetched_keys.len()
     );
 
-    let keys_to_add: Vec<&str> = if all {
-        fetched_keys.clone()
-    } else if let Some(ref provided_key) = effective_key {
-        // Match the provided public key against the fetched GitHub keys.
-        let provided_prefix = ssh_key_prefix(provided_key);
-        let matched: Vec<&str> = fetched_keys
-            .iter()
-            .filter(|github_key| ssh_key_prefix(github_key) == provided_prefix)
-            .copied()
-            .collect();
-
-        if matched.is_empty() {
-            anyhow::bail!("the provided key does not match any of {username}'s GitHub keys");
-        }
-        matched
-    } else {
-        // Discover local public keys and filter fetched keys to only those with a
-        // matching local private key.
-        let local_pub_keys = local_public_key_contents();
-        let matched: Vec<&str> = fetched_keys
-            .iter()
-            .filter(|github_key| {
-                let github_prefix = ssh_key_prefix(github_key);
-                local_pub_keys
-                    .iter()
-                    .any(|local_key| ssh_key_prefix(local_key) == github_prefix)
-            })
-            .copied()
-            .collect();
-
-        let skipped = fetched_keys.len() - matched.len();
-        if matched.is_empty() {
-            anyhow::bail!(
-                "none of {username}'s GitHub keys match a local private key in ~/.ssh/; pass --all to add all keys, or --key to specify one"
-            );
-        }
-        if skipped > 0 {
-            println!(
-                "add-github-user: matched {} key(s) to local private keys (skipped {skipped})",
-                matched.len()
-            );
-        }
-        matched
-    };
+    let keys_to_add =
+        select_github_keys_to_add(username, all, effective_key.as_ref(), &fetched_keys)?;
 
     let mut recipients = Vec::new();
     for line in &keys_to_add {
@@ -1751,15 +1832,90 @@ fn cmd_add_github_user(
         &recipients,
         "add-github-user",
     )?;
+
+    finalize_github_user_source(
+        &repo_root,
+        username,
+        auto_wrap,
+        session_key.as_deref(),
+        &recipients,
+        &mut registry,
+        &github_options,
+    )?;
+
+    println!(
+        "add-github-user: added source for {username} ({} recipient(s))",
+        recipients.len()
+    );
+    Ok(())
+}
+
+fn select_github_keys_to_add<'a>(
+    username: &str,
+    all: bool,
+    effective_key: Option<&String>,
+    fetched_keys: &[&'a str],
+) -> Result<Vec<&'a str>> {
+    if all {
+        return Ok(fetched_keys.to_vec());
+    }
+    if let Some(provided_key) = effective_key {
+        let provided_prefix = ssh_key_prefix(provided_key);
+        let matched: Vec<&str> = fetched_keys
+            .iter()
+            .filter(|github_key| ssh_key_prefix(github_key) == provided_prefix)
+            .copied()
+            .collect();
+        if matched.is_empty() {
+            anyhow::bail!("the provided key does not match any of {username}'s GitHub keys");
+        }
+        return Ok(matched);
+    }
+    // Discover local public keys and filter fetched keys to only those with a
+    // matching local private key.
+    let local_pub_keys = local_public_key_contents();
+    let matched: Vec<&str> = fetched_keys
+        .iter()
+        .filter(|github_key| {
+            let github_prefix = ssh_key_prefix(github_key);
+            local_pub_keys
+                .iter()
+                .any(|local_key| ssh_key_prefix(local_key) == github_prefix)
+        })
+        .copied()
+        .collect();
+    let skipped = fetched_keys.len() - matched.len();
+    if matched.is_empty() {
+        anyhow::bail!(
+            "none of {username}'s GitHub keys match a local private key in ~/.ssh/; pass --all to add all keys, or --key to specify one"
+        );
+    }
+    if skipped > 0 {
+        println!(
+            "add-github-user: matched {} key(s) to local private keys (skipped {skipped})",
+            matched.len()
+        );
+    }
+    Ok(matched)
+}
+
+fn finalize_github_user_source(
+    repo_root: &std::path::Path,
+    username: &str,
+    auto_wrap: bool,
+    session_key: Option<&[u8]>,
+    recipients: &[RecipientKey],
+    registry: &mut GithubSourceRegistry,
+    github_options: &GithubFetchOptions,
+) -> Result<()> {
     let fingerprints: Vec<String> = recipients
         .iter()
         .map(|recipient| recipient.fingerprint.clone())
         .collect();
-
     if auto_wrap {
-        if let Some(key) = session_key.as_deref() {
-            for recipient in &recipients {
-                wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
+        if let Some(key) = session_key {
+            for recipient in recipients {
+                wrap_repo_key_for_recipient(repo_root, recipient, key)?;
             }
         } else {
             println!(
@@ -1767,7 +1923,6 @@ fn cmd_add_github_user(
             );
         }
     }
-
     registry.users.retain(|source| source.username != username);
     registry.users.push(GithubUserSource {
         username: username.to_string(),
@@ -1778,12 +1933,7 @@ fn cmd_add_github_user(
         last_refresh_status_code: Some("ok".to_string()),
         last_refresh_message: Some("added source".to_string()),
     });
-    write_github_sources(&repo_root, &registry)?;
-
-    println!(
-        "add-github-user: added source for {username} ({} recipient(s))",
-        recipients.len()
-    );
+    write_github_sources(repo_root, registry)?;
     Ok(())
 }
 
@@ -1983,8 +2133,198 @@ fn cmd_remove_github_team(org: &str, team: &str) -> Result<()> {
     Ok(())
 }
 
+fn refresh_output_results(
+    label: &str,
+    events: Vec<serde_json::Value>,
+    drift_detected: bool,
+    fail_on_drift: bool,
+    refresh_errors: &[String],
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "events": events,
+                "drift_detected": drift_detected,
+            }))?
+        );
+    } else {
+        for event in events {
+            println!("{label}: {event}");
+        }
+    }
+
+    if fail_on_drift && drift_detected {
+        anyhow::bail!("{label} detected access drift");
+    }
+
+    if !refresh_errors.is_empty() {
+        anyhow::bail!(
+            "{label} failed for {} source(s): {}",
+            refresh_errors.len(),
+            refresh_errors.join(" | ")
+        );
+    }
+
+    Ok(())
+}
+
+fn refresh_github_keys_handle_not_modified(
+    source: &GithubUserSource,
+    fetched_user: &git_sshripped_recipient::GithubUserKeys,
+    before_set: &std::collections::HashSet<String>,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+    events: &mut Vec<serde_json::Value>,
+) {
+    if !dry_run
+        && let Some(entry) = registry
+            .users
+            .iter_mut()
+            .find(|entry| entry.username == source.username)
+    {
+        entry.last_refresh_status_code = Some("not_modified".to_string());
+        entry.last_refresh_message = Some("source unchanged (etag)".to_string());
+        entry.last_refreshed_unix = now_unix();
+    }
+    events.push(serde_json::json!({
+        "username": source.username,
+        "ok": true,
+        "added": Vec::<String>::new(),
+        "removed": Vec::<String>::new(),
+        "unchanged": before_set.len(),
+        "dry_run": dry_run,
+        "backend": format!("{:?}", fetched_user.backend),
+        "authenticated": fetched_user.authenticated,
+        "auth_mode": github_auth_mode_label(fetched_user.auth_mode),
+        "not_modified": true,
+        "rate_limit_remaining": fetched_user.metadata.rate_limit_remaining,
+        "rate_limit_reset_unix": fetched_user.metadata.rate_limit_reset_unix,
+    }));
+}
+
+fn refresh_github_keys_handle_error(
+    source: &GithubUserSource,
+    err: &anyhow::Error,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+    refresh_errors: &mut Vec<String>,
+    events: &mut Vec<serde_json::Value>,
+) {
+    let code = classify_github_refresh_error(err).to_string();
+    let message = format!("{err:#}");
+    if !dry_run
+        && let Some(entry) = registry
+            .users
+            .iter_mut()
+            .find(|entry| entry.username == source.username)
+    {
+        entry.last_refresh_status_code = Some(code.clone());
+        entry.last_refresh_message = Some(message.clone());
+        entry.last_refreshed_unix = now_unix();
+    }
+    refresh_errors.push(format!("{}({}): {}", source.username, code, message));
+    events.push(serde_json::json!({
+        "username": source.username,
+        "ok": false,
+        "error_code": code,
+        "error": message,
+        "dry_run": dry_run,
+    }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_github_keys_apply_changes(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    source: &GithubUserSource,
+    fetched_user: &git_sshripped_recipient::GithubUserKeys,
+    github_options: &GithubFetchOptions,
+    session_key: Option<&[u8]>,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+) -> Result<(Vec<String>, Vec<String>, usize, bool)> {
+    let existing_fingerprints: std::collections::HashSet<String> = list_recipients(repo_root)?
+        .into_iter()
+        .map(|recipient| recipient.fingerprint)
+        .collect();
+    let before_set: std::collections::HashSet<String> =
+        source.fingerprints.iter().cloned().collect();
+    let _ = github_options;
+
+    let fetched = fetched_user
+        .keys
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            add_recipient_from_public_key(
+                repo_root,
+                line,
+                RecipientSource::GithubKeys {
+                    url: source.url.clone(),
+                    username: Some(source.username.clone()),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let after_set: std::collections::HashSet<String> = fetched
+        .iter()
+        .map(|recipient| recipient.fingerprint.clone())
+        .collect();
+
+    enforce_allowed_key_types_for_added_recipients(
+        repo_root,
+        manifest,
+        &existing_fingerprints,
+        &fetched,
+        "refresh-github-keys",
+    )?;
+
+    let added: Vec<String> = after_set.difference(&before_set).cloned().collect();
+    let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
+    let unchanged = before_set.intersection(&after_set).count();
+    let drift = !added.is_empty() || !removed.is_empty();
+
+    if !dry_run {
+        let mut safe_remove = Vec::new();
+        for fingerprint in &removed {
+            if !fingerprint_in_other_sources(registry, fingerprint, Some(&source.username), None) {
+                safe_remove.push(fingerprint.clone());
+            }
+        }
+        let current_count = list_recipients(repo_root)?.len();
+        enforce_min_recipients(
+            manifest,
+            current_count.saturating_sub(safe_remove.len()),
+            "refresh-github-keys",
+        )?;
+        let _ = remove_recipients_by_fingerprints(repo_root, &safe_remove)?;
+
+        if let Some(key) = session_key {
+            for recipient in &fetched {
+                wrap_repo_key_for_recipient(repo_root, recipient, key)?;
+            }
+        }
+
+        if let Some(entry) = registry
+            .users
+            .iter_mut()
+            .find(|entry| entry.username == source.username)
+        {
+            entry.fingerprints = after_set.iter().cloned().collect();
+            entry.last_refreshed_unix = now_unix();
+            entry.etag.clone_from(&fetched_user.metadata.etag);
+            entry.last_refresh_status_code = Some("ok".to_string());
+            entry.last_refresh_message = Some("refresh succeeded".to_string());
+        }
+    }
+
+    Ok((added, removed, unchanged, drift))
+}
+
 fn cmd_refresh_github_keys(
-    username: Option<String>,
+    username: Option<&str>,
     dry_run: bool,
     fail_on_drift: bool,
     json: bool,
@@ -1994,7 +2334,7 @@ fn cmd_refresh_github_keys(
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets: Vec<_> = registry.users.clone();
-    if let Some(user) = username.as_deref() {
+    if let Some(user) = username {
         targets.retain(|source| source.username == user);
     }
 
@@ -2009,10 +2349,6 @@ fn cmd_refresh_github_keys(
     let mut refresh_errors = Vec::new();
 
     for source in targets {
-        let existing_fingerprints: std::collections::HashSet<String> = list_recipients(&repo_root)?
-            .into_iter()
-            .map(|recipient| recipient.fingerprint)
-            .collect();
         let before_set: std::collections::HashSet<String> =
             source.fingerprints.iter().cloned().collect();
         let fetched_user = match fetch_github_user_keys_with_options(
@@ -2022,130 +2358,42 @@ fn cmd_refresh_github_keys(
         ) {
             Ok(value) => value,
             Err(err) => {
-                let code = classify_github_refresh_error(&err).to_string();
-                let message = format!("{err:#}");
-                if !dry_run
-                    && let Some(entry) = registry
-                        .users
-                        .iter_mut()
-                        .find(|entry| entry.username == source.username)
-                {
-                    entry.last_refresh_status_code = Some(code.clone());
-                    entry.last_refresh_message = Some(message.clone());
-                    entry.last_refreshed_unix = now_unix();
-                }
-                refresh_errors.push(format!("{}({}): {}", source.username, code, message));
-                events.push(serde_json::json!({
-                    "username": source.username,
-                    "ok": false,
-                    "error_code": code,
-                    "error": message,
-                    "dry_run": dry_run,
-                }));
+                refresh_github_keys_handle_error(
+                    &source,
+                    &err,
+                    dry_run,
+                    &mut registry,
+                    &mut refresh_errors,
+                    &mut events,
+                );
                 continue;
             }
         };
 
         if fetched_user.metadata.not_modified {
-            if !dry_run
-                && let Some(entry) = registry
-                    .users
-                    .iter_mut()
-                    .find(|entry| entry.username == source.username)
-            {
-                entry.last_refresh_status_code = Some("not_modified".to_string());
-                entry.last_refresh_message = Some("source unchanged (etag)".to_string());
-                entry.last_refreshed_unix = now_unix();
-            }
-            events.push(serde_json::json!({
-                "username": source.username,
-                "ok": true,
-                "added": Vec::<String>::new(),
-                "removed": Vec::<String>::new(),
-                "unchanged": before_set.len(),
-                "dry_run": dry_run,
-                "backend": format!("{:?}", fetched_user.backend),
-                "authenticated": fetched_user.authenticated,
-                "auth_mode": github_auth_mode_label(fetched_user.auth_mode),
-                "not_modified": true,
-                "rate_limit_remaining": fetched_user.metadata.rate_limit_remaining,
-                "rate_limit_reset_unix": fetched_user.metadata.rate_limit_reset_unix,
-            }));
+            refresh_github_keys_handle_not_modified(
+                &source,
+                &fetched_user,
+                &before_set,
+                dry_run,
+                &mut registry,
+                &mut events,
+            );
             continue;
         }
 
-        let fetched = fetched_user
-            .keys
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                add_recipient_from_public_key(
-                    &repo_root,
-                    line,
-                    RecipientSource::GithubKeys {
-                        url: source.url.clone(),
-                        username: Some(source.username.clone()),
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let after_set: std::collections::HashSet<String> = fetched
-            .iter()
-            .map(|recipient| recipient.fingerprint.clone())
-            .collect();
-
-        enforce_allowed_key_types_for_added_recipients(
+        let (added, removed, unchanged, drift) = refresh_github_keys_apply_changes(
             &repo_root,
             &manifest,
-            &existing_fingerprints,
-            &fetched,
-            "refresh-github-keys",
+            &source,
+            &fetched_user,
+            &github_options,
+            session_key.as_deref(),
+            dry_run,
+            &mut registry,
         )?;
-
-        let added: Vec<String> = after_set.difference(&before_set).cloned().collect();
-        let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
-        let unchanged = before_set.intersection(&after_set).count();
-        if !added.is_empty() || !removed.is_empty() {
+        if drift {
             drift_detected = true;
-        }
-
-        if !dry_run {
-            let mut safe_remove = Vec::new();
-            for fingerprint in &removed {
-                if !fingerprint_in_other_sources(
-                    &registry,
-                    fingerprint,
-                    Some(&source.username),
-                    None,
-                ) {
-                    safe_remove.push(fingerprint.clone());
-                }
-            }
-            let current_count = list_recipients(&repo_root)?.len();
-            enforce_min_recipients(
-                &manifest,
-                current_count.saturating_sub(safe_remove.len()),
-                "refresh-github-keys",
-            )?;
-            let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
-
-            if let Some(key) = session_key.as_deref() {
-                for recipient in &fetched {
-                    wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
-                }
-            }
-
-            if let Some(entry) = registry
-                .users
-                .iter_mut()
-                .find(|entry| entry.username == source.username)
-            {
-                entry.fingerprints = after_set.iter().cloned().collect();
-                entry.last_refreshed_unix = now_unix();
-                entry.etag = fetched_user.metadata.etag.clone();
-                entry.last_refresh_status_code = Some("ok".to_string());
-                entry.last_refresh_message = Some("refresh succeeded".to_string());
-            }
         }
 
         events.push(serde_json::json!({
@@ -2168,38 +2416,283 @@ fn cmd_refresh_github_keys(
         write_github_sources(&repo_root, &registry)?;
     }
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "events": events,
-                "drift_detected": drift_detected,
-            }))?
-        );
-    } else {
-        for event in events {
-            println!("refresh-github-keys: {}", event);
+    refresh_output_results(
+        "refresh-github-keys",
+        events,
+        drift_detected,
+        fail_on_drift,
+        &refresh_errors,
+        json,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_github_teams_handle_not_modified(
+    source: &GithubTeamSource,
+    fetched_team_metadata: &git_sshripped_recipient::GithubFetchMetadata,
+    backend: git_sshripped_recipient::GithubBackend,
+    authenticated: bool,
+    fetched_team_auth_mode: git_sshripped_recipient::GithubAuthMode,
+    before_set: &std::collections::HashSet<String>,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+    events: &mut Vec<serde_json::Value>,
+) {
+    if !dry_run
+        && let Some(entry) = registry
+            .teams
+            .iter_mut()
+            .find(|entry| entry.org == source.org && entry.team == source.team)
+    {
+        entry.last_refresh_status_code = Some("not_modified".to_string());
+        entry.last_refresh_message = Some("source unchanged (etag)".to_string());
+        entry.last_refreshed_unix = now_unix();
+    }
+    events.push(serde_json::json!({
+        "org": source.org,
+        "team": source.team,
+        "ok": true,
+        "added": Vec::<String>::new(),
+        "removed": Vec::<String>::new(),
+        "unchanged": before_set.len(),
+        "dry_run": dry_run,
+        "backend": format!("{:?}", backend),
+        "authenticated": authenticated,
+        "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
+        "not_modified": true,
+        "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
+        "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
+    }));
+}
+
+fn refresh_github_teams_handle_error(
+    source: &GithubTeamSource,
+    err: &anyhow::Error,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+    refresh_errors: &mut Vec<String>,
+    events: &mut Vec<serde_json::Value>,
+) {
+    let code = classify_github_refresh_error(err).to_string();
+    let message = format!("{err:#}");
+    if !dry_run
+        && let Some(entry) = registry
+            .teams
+            .iter_mut()
+            .find(|entry| entry.org == source.org && entry.team == source.team)
+    {
+        entry.last_refresh_status_code = Some(code.clone());
+        entry.last_refresh_message = Some(message.clone());
+        entry.last_refreshed_unix = now_unix();
+    }
+    refresh_errors.push(format!(
+        "{}/{}({}): {}",
+        source.org, source.team, code, message
+    ));
+    events.push(serde_json::json!({
+        "org": source.org,
+        "team": source.team,
+        "ok": false,
+        "error_code": code,
+        "error": message,
+        "dry_run": dry_run,
+    }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_github_teams_fetch_members(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    members: &[String],
+    github_options: &GithubFetchOptions,
+    session_key: Option<&[u8]>,
+    dry_run: bool,
+) -> Result<std::collections::HashSet<String>> {
+    let mut fetched_fingerprints = std::collections::HashSet::new();
+    for member in members {
+        let existing_fingerprints: std::collections::HashSet<String> = list_recipients(repo_root)?
+            .into_iter()
+            .map(|recipient| recipient.fingerprint)
+            .collect();
+        let imported =
+            add_recipients_from_github_username_with_options(repo_root, member, github_options)?;
+        enforce_allowed_key_types_for_added_recipients(
+            repo_root,
+            manifest,
+            &existing_fingerprints,
+            &imported,
+            "refresh-github-teams",
+        )?;
+        if let Some(key) = session_key
+            && !dry_run
+        {
+            for recipient in &imported {
+                wrap_repo_key_for_recipient(repo_root, recipient, key)?;
+            }
+        }
+        for recipient in imported {
+            fetched_fingerprints.insert(recipient.fingerprint);
         }
     }
+    Ok(fetched_fingerprints)
+}
 
-    if fail_on_drift && drift_detected {
-        anyhow::bail!("refresh-github-keys detected access drift");
+#[allow(clippy::too_many_arguments)]
+fn refresh_github_teams_apply_removals(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    source: &GithubTeamSource,
+    members: Vec<String>,
+    fetched_fingerprints: &std::collections::HashSet<String>,
+    fetched_team_metadata: &git_sshripped_recipient::GithubFetchMetadata,
+    removed: &[String],
+    registry: &mut GithubSourceRegistry,
+) -> Result<()> {
+    let mut safe_remove = Vec::new();
+    for fingerprint in removed {
+        if !fingerprint_in_other_sources(
+            registry,
+            fingerprint,
+            None,
+            Some((&source.org, &source.team)),
+        ) {
+            safe_remove.push(fingerprint.clone());
+        }
     }
+    let current_count = list_recipients(repo_root)?.len();
+    enforce_min_recipients(
+        manifest,
+        current_count.saturating_sub(safe_remove.len()),
+        "refresh-github-teams",
+    )?;
+    let _ = remove_recipients_by_fingerprints(repo_root, &safe_remove)?;
 
-    if !refresh_errors.is_empty() {
-        anyhow::bail!(
-            "refresh-github-keys failed for {} source(s): {}",
-            refresh_errors.len(),
-            refresh_errors.join(" | ")
+    if let Some(entry) = registry
+        .teams
+        .iter_mut()
+        .find(|entry| entry.org == source.org && entry.team == source.team)
+    {
+        entry.member_usernames = members;
+        entry.fingerprints = fetched_fingerprints.iter().cloned().collect();
+        entry.last_refreshed_unix = now_unix();
+        entry.etag.clone_from(&fetched_team_metadata.etag);
+        entry.last_refresh_status_code = Some("ok".to_string());
+        entry.last_refresh_message = Some("refresh succeeded".to_string());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_github_teams_process_source(
+    source: &GithubTeamSource,
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    github_options: &GithubFetchOptions,
+    session_key: Option<&[u8]>,
+    dry_run: bool,
+    registry: &mut GithubSourceRegistry,
+    events: &mut Vec<serde_json::Value>,
+    drift_detected: &mut bool,
+    refresh_errors: &mut Vec<String>,
+) -> Result<()> {
+    let fetched_team = match fetch_github_team_members_with_options(
+        &source.org,
+        &source.team,
+        github_options,
+        source.etag.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            refresh_github_teams_handle_error(
+                source,
+                &err,
+                dry_run,
+                registry,
+                refresh_errors,
+                events,
+            );
+            return Ok(());
+        }
+    };
+    let fetched_team_metadata = fetched_team.metadata.clone();
+    let fetched_team_auth_mode = fetched_team.auth_mode;
+    let members = fetched_team.members;
+    let backend = fetched_team.backend;
+    let authenticated = fetched_team.authenticated;
+
+    let before_set: std::collections::HashSet<String> =
+        source.fingerprints.iter().cloned().collect();
+    if fetched_team_metadata.not_modified {
+        refresh_github_teams_handle_not_modified(
+            source,
+            &fetched_team_metadata,
+            backend,
+            authenticated,
+            fetched_team_auth_mode,
+            &before_set,
+            dry_run,
+            registry,
+            events,
         );
+        return Ok(());
     }
 
+    let fetched_fingerprints = refresh_github_teams_fetch_members(
+        repo_root,
+        manifest,
+        &members,
+        github_options,
+        session_key,
+        dry_run,
+    )?;
+
+    let added: Vec<String> = fetched_fingerprints
+        .difference(&before_set)
+        .cloned()
+        .collect();
+    let removed: Vec<String> = before_set
+        .difference(&fetched_fingerprints)
+        .cloned()
+        .collect();
+    let unchanged = before_set.intersection(&fetched_fingerprints).count();
+    if !added.is_empty() || !removed.is_empty() {
+        *drift_detected = true;
+    }
+
+    if !dry_run {
+        refresh_github_teams_apply_removals(
+            repo_root,
+            manifest,
+            source,
+            members,
+            &fetched_fingerprints,
+            &fetched_team_metadata,
+            &removed,
+            registry,
+        )?;
+    }
+
+    events.push(serde_json::json!({
+        "org": source.org,
+        "team": source.team,
+        "ok": true,
+        "added": added,
+        "removed": removed,
+        "unchanged": unchanged,
+        "dry_run": dry_run,
+        "backend": format!("{:?}", backend),
+        "authenticated": authenticated,
+        "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
+        "not_modified": false,
+        "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
+        "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
+    }));
     Ok(())
 }
 
 fn cmd_refresh_github_teams(
-    org: Option<String>,
-    team: Option<String>,
+    org: Option<&str>,
+    team: Option<&str>,
     dry_run: bool,
     fail_on_drift: bool,
     json: bool,
@@ -2209,10 +2702,10 @@ fn cmd_refresh_github_teams(
     let manifest = read_manifest(&repo_root)?;
     let mut registry = read_github_sources(&repo_root)?;
     let mut targets = registry.teams.clone();
-    if let Some(org) = org.as_deref() {
+    if let Some(org) = org {
         targets.retain(|source| source.org == org);
     }
-    if let Some(team) = team.as_deref() {
+    if let Some(team) = team {
         targets.retain(|source| source.team == team);
     }
     if targets.is_empty() {
@@ -2226,204 +2719,32 @@ fn cmd_refresh_github_teams(
     let mut refresh_errors = Vec::new();
 
     for source in targets {
-        let fetched_team = match fetch_github_team_members_with_options(
-            &source.org,
-            &source.team,
+        refresh_github_teams_process_source(
+            &source,
+            &repo_root,
+            &manifest,
             &github_options,
-            source.etag.as_deref(),
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                let code = classify_github_refresh_error(&err).to_string();
-                let message = format!("{err:#}");
-                if !dry_run
-                    && let Some(entry) = registry
-                        .teams
-                        .iter_mut()
-                        .find(|entry| entry.org == source.org && entry.team == source.team)
-                {
-                    entry.last_refresh_status_code = Some(code.clone());
-                    entry.last_refresh_message = Some(message.clone());
-                    entry.last_refreshed_unix = now_unix();
-                }
-                refresh_errors.push(format!(
-                    "{}/{}({}): {}",
-                    source.org, source.team, code, message
-                ));
-                events.push(serde_json::json!({
-                    "org": source.org,
-                    "team": source.team,
-                    "ok": false,
-                    "error_code": code,
-                    "error": message,
-                    "dry_run": dry_run,
-                }));
-                continue;
-            }
-        };
-        let fetched_team_metadata = fetched_team.metadata.clone();
-        let fetched_team_auth_mode = fetched_team.auth_mode;
-        let members = fetched_team.members;
-        let backend = fetched_team.backend;
-        let authenticated = fetched_team.authenticated;
-        let mut fetched_fingerprints = std::collections::HashSet::new();
-
-        let before_set: std::collections::HashSet<String> =
-            source.fingerprints.iter().cloned().collect();
-        if fetched_team_metadata.not_modified {
-            if !dry_run
-                && let Some(entry) = registry
-                    .teams
-                    .iter_mut()
-                    .find(|entry| entry.org == source.org && entry.team == source.team)
-            {
-                entry.last_refresh_status_code = Some("not_modified".to_string());
-                entry.last_refresh_message = Some("source unchanged (etag)".to_string());
-                entry.last_refreshed_unix = now_unix();
-            }
-            events.push(serde_json::json!({
-                "org": source.org,
-                "team": source.team,
-                "ok": true,
-                "added": Vec::<String>::new(),
-                "removed": Vec::<String>::new(),
-                "unchanged": before_set.len(),
-                "dry_run": dry_run,
-                "backend": format!("{:?}", backend),
-                "authenticated": authenticated,
-                "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
-                "not_modified": true,
-                "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
-                "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
-            }));
-            continue;
-        }
-
-        for member in &members {
-            let existing_fingerprints: std::collections::HashSet<String> =
-                list_recipients(&repo_root)?
-                    .into_iter()
-                    .map(|recipient| recipient.fingerprint)
-                    .collect();
-            let imported = add_recipients_from_github_username_with_options(
-                &repo_root,
-                member,
-                &github_options,
-            )?;
-            enforce_allowed_key_types_for_added_recipients(
-                &repo_root,
-                &manifest,
-                &existing_fingerprints,
-                &imported,
-                "refresh-github-teams",
-            )?;
-            if let Some(key) = session_key.as_deref()
-                && !dry_run
-            {
-                for recipient in &imported {
-                    wrap_repo_key_for_recipient(&repo_root, recipient, key)?;
-                }
-            }
-            for recipient in imported {
-                fetched_fingerprints.insert(recipient.fingerprint);
-            }
-        }
-
-        let added: Vec<String> = fetched_fingerprints
-            .difference(&before_set)
-            .cloned()
-            .collect();
-        let removed: Vec<String> = before_set
-            .difference(&fetched_fingerprints)
-            .cloned()
-            .collect();
-        let unchanged = before_set.intersection(&fetched_fingerprints).count();
-        if !added.is_empty() || !removed.is_empty() {
-            drift_detected = true;
-        }
-
-        if !dry_run {
-            let mut safe_remove = Vec::new();
-            for fingerprint in &removed {
-                if !fingerprint_in_other_sources(
-                    &registry,
-                    fingerprint,
-                    None,
-                    Some((&source.org, &source.team)),
-                ) {
-                    safe_remove.push(fingerprint.clone());
-                }
-            }
-            let current_count = list_recipients(&repo_root)?.len();
-            enforce_min_recipients(
-                &manifest,
-                current_count.saturating_sub(safe_remove.len()),
-                "refresh-github-teams",
-            )?;
-            let _ = remove_recipients_by_fingerprints(&repo_root, &safe_remove)?;
-
-            if let Some(entry) = registry
-                .teams
-                .iter_mut()
-                .find(|entry| entry.org == source.org && entry.team == source.team)
-            {
-                entry.member_usernames = members;
-                entry.fingerprints = fetched_fingerprints.iter().cloned().collect();
-                entry.last_refreshed_unix = now_unix();
-                entry.etag = fetched_team_metadata.etag.clone();
-                entry.last_refresh_status_code = Some("ok".to_string());
-                entry.last_refresh_message = Some("refresh succeeded".to_string());
-            }
-        }
-
-        events.push(serde_json::json!({
-            "org": source.org,
-            "team": source.team,
-            "ok": true,
-            "added": added,
-            "removed": removed,
-            "unchanged": unchanged,
-            "dry_run": dry_run,
-            "backend": format!("{:?}", backend),
-            "authenticated": authenticated,
-            "auth_mode": github_auth_mode_label(fetched_team_auth_mode),
-            "not_modified": false,
-            "rate_limit_remaining": fetched_team_metadata.rate_limit_remaining,
-            "rate_limit_reset_unix": fetched_team_metadata.rate_limit_reset_unix,
-        }));
+            session_key.as_deref(),
+            dry_run,
+            &mut registry,
+            &mut events,
+            &mut drift_detected,
+            &mut refresh_errors,
+        )?;
     }
 
     if !dry_run {
         write_github_sources(&repo_root, &registry)?;
     }
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "events": events,
-                "drift_detected": drift_detected,
-            }))?
-        );
-    } else {
-        for event in events {
-            println!("refresh-github-teams: {}", event);
-        }
-    }
-
-    if fail_on_drift && drift_detected {
-        anyhow::bail!("refresh-github-teams detected access drift");
-    }
-
-    if !refresh_errors.is_empty() {
-        anyhow::bail!(
-            "refresh-github-teams failed for {} source(s): {}",
-            refresh_errors.len(),
-            refresh_errors.join(" | ")
-        );
-    }
-
-    Ok(())
+    refresh_output_results(
+        "refresh-github-teams",
+        events,
+        drift_detected,
+        fail_on_drift,
+        &refresh_errors,
+        json,
+    )
 }
 
 fn cmd_access_audit(identities: Vec<String>, json: bool) -> Result<()> {
@@ -2466,7 +2787,7 @@ fn cmd_access_audit(identities: Vec<String>, json: bool) -> Result<()> {
         );
     } else {
         for row in &rows {
-            println!("{}", row);
+            println!("{row}");
         }
         println!("access-audit: accessible recipients={accessible}");
     }
@@ -2750,97 +3071,19 @@ fn build_gitattributes_migration_plan(text: &str) -> GitattributesMigrationPlan 
     }
 }
 
-fn cmd_migrate_from_git_crypt(
-    dry_run: bool,
-    reencrypt: bool,
-    verify: bool,
-    json: bool,
-    write_report: Option<String>,
-) -> Result<()> {
-    let repo_root = current_repo_root()?;
-    let manifest_policy = read_manifest(&repo_root).unwrap_or_default();
-    enforce_existing_recipient_policy(&repo_root, &manifest_policy, "migrate-from-git-crypt")?;
-    let path = repo_root.join(".gitattributes");
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-
-    let plan = build_gitattributes_migration_plan(&text);
-    if plan.patterns.is_empty() {
-        let payload = serde_json::json!({
-            "ok": true,
-            "dry_run": dry_run,
-            "noop": true,
-            "reason": "no git-crypt or git-sshripped patterns found",
-            "migration_analysis": {
-                "rewritable_lines": plan.rewritable_lines,
-                "ambiguous": plan.ambiguous_lines,
-                "manual_intervention": plan.manual_intervention_lines,
-                "idempotent_rewrite": plan.idempotent_rewrite,
-            }
-        });
-        if json {
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-        } else {
-            println!("migrate-from-git-crypt: no matching patterns found; nothing to do");
-        }
-        return Ok(());
-    }
-
-    let mut manifest_before = read_manifest(&repo_root).unwrap_or_default();
-    if let Some(key) = repo_key_from_session().ok().flatten() {
-        manifest_before.repo_key_id = Some(repo_key_id_from_bytes(&key));
-    }
-    let manifest_after = manifest_before;
-
-    let imported_patterns = plan.patterns.len();
-    let changed_patterns = true;
-
-    if !dry_run {
-        fs::write(&path, &plan.rewritten_text)
-            .with_context(|| format!("failed to rewrite {}", path.display()))?;
-        write_manifest(&repo_root, &manifest_after)?;
-        install_gitattributes(
-            &repo_root,
-            &plan.patterns.iter().cloned().collect::<Vec<_>>(),
-        )?;
-        install_git_filters(&repo_root, &current_bin_path())?;
-    }
-
-    let mut reencrypted_files = 0usize;
-    if reencrypt {
-        if dry_run {
-            reencrypted_files = protected_tracked_files(&repo_root)?.len();
-        } else {
-            reencrypted_files = reencrypt_with_current_session(&repo_root)?;
-        }
-    }
-
-    let mut verify_failures_list = Vec::new();
-    if verify {
-        verify_failures_list = verify_failures(&repo_root)?;
-        if !verify_failures_list.is_empty() && !dry_run {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": false,
-                        "dry_run": dry_run,
-                        "verify_failures": verify_failures_list,
-                    }))?
-                );
-            } else {
-                println!("migrate-from-git-crypt: verify failed");
-                for failure in &verify_failures_list {
-                    eprintln!("- {failure}");
-                }
-            }
-            anyhow::bail!("migration verification failed");
-        }
-    }
-
-    let mut report = serde_json::json!({
+fn build_migration_report(
+    plan: &GitattributesMigrationPlan,
+    manifest_after: &RepositoryManifest,
+    opts: &MigrateOptions,
+    imported_patterns: usize,
+    changed_patterns: bool,
+    reencrypted_files: usize,
+    verify_failures_list: &[String],
+) -> serde_json::Value {
+    let empty_vec: Vec<String> = Vec::new();
+    serde_json::json!({
         "ok": true,
-        "dry_run": dry_run,
+        "dry_run": opts.dry_run,
         "gitattributes": {
             "legacy_lines_found": plan.legacy_lines_found,
             "legacy_lines_replaced": plan.legacy_lines_replaced,
@@ -2855,23 +3098,117 @@ fn cmd_migrate_from_git_crypt(
         "imported_patterns": imported_patterns,
         "changed_patterns": changed_patterns,
         "repo_key_id": manifest_after.repo_key_id,
-        "reencrypt_requested": reencrypt,
+        "reencrypt_requested": opts.reencrypt,
         "reencrypted_files": reencrypted_files,
-        "verify_requested": verify,
-        "verify_failures": if dry_run { vec![] } else { verify_failures_list.clone() },
-        "files_requiring_reencrypt": if dry_run { verify_failures_list.clone() } else { vec![] },
-    });
+        "verify_requested": opts.verify,
+        "files_requiring_reencrypt": if opts.dry_run { verify_failures_list } else { &empty_vec },
+        "verify_failures": if opts.dry_run { &empty_vec } else { verify_failures_list },
+    })
+}
 
-    if let Some(path) = write_report {
+fn migrate_check_verify(repo_root: &std::path::Path, opts: &MigrateOptions) -> Result<Vec<String>> {
+    let mut verify_failures_list = Vec::new();
+    if opts.verify {
+        verify_failures_list = verify_failures(repo_root)?;
+        if !verify_failures_list.is_empty() && !opts.dry_run {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": false,
+                        "dry_run": opts.dry_run,
+                        "verify_failures": verify_failures_list,
+                    }))?
+                );
+            } else {
+                println!("migrate-from-git-crypt: verify failed");
+                for failure in &verify_failures_list {
+                    eprintln!("- {failure}");
+                }
+            }
+            anyhow::bail!("migration verification failed");
+        }
+    }
+    Ok(verify_failures_list)
+}
+
+fn cmd_migrate_from_git_crypt(opts: &MigrateOptions) -> Result<()> {
+    let repo_root = current_repo_root()?;
+    let manifest_policy = read_manifest(&repo_root).unwrap_or_default();
+    enforce_existing_recipient_policy(&repo_root, &manifest_policy, "migrate-from-git-crypt")?;
+    let path = repo_root.join(".gitattributes");
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+
+    let plan = build_gitattributes_migration_plan(&text);
+    if plan.patterns.is_empty() {
+        let payload = serde_json::json!({
+            "ok": true,
+            "dry_run": opts.dry_run,
+            "noop": true,
+            "reason": "no git-crypt or git-sshripped patterns found",
+            "migration_analysis": {
+                "rewritable_lines": plan.rewritable_lines,
+                "ambiguous": plan.ambiguous_lines,
+                "manual_intervention": plan.manual_intervention_lines,
+                "idempotent_rewrite": plan.idempotent_rewrite,
+            }
+        });
+        if opts.json {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("migrate-from-git-crypt: no matching patterns found; nothing to do");
+        }
+        return Ok(());
+    }
+
+    let mut manifest_after = read_manifest(&repo_root).unwrap_or_default();
+    if let Some(key) = repo_key_from_session().ok().flatten() {
+        manifest_after.repo_key_id = Some(repo_key_id_from_bytes(&key));
+    }
+    let imported_patterns = plan.patterns.len();
+    let changed_patterns = true;
+
+    if !opts.dry_run {
+        fs::write(&path, &plan.rewritten_text)
+            .with_context(|| format!("failed to rewrite {}", path.display()))?;
+        write_manifest(&repo_root, &manifest_after)?;
+        install_gitattributes(&repo_root, &plan.patterns)?;
+        install_git_filters(&repo_root, &current_bin_path())?;
+    }
+
+    let reencrypted_files = if opts.reencrypt {
+        if opts.dry_run {
+            protected_tracked_files(&repo_root)?.len()
+        } else {
+            reencrypt_with_current_session(&repo_root)?
+        }
+    } else {
+        0usize
+    };
+
+    let verify_failures_list = migrate_check_verify(&repo_root, opts)?;
+
+    let mut report = build_migration_report(
+        &plan,
+        &manifest_after,
+        opts,
+        imported_patterns,
+        changed_patterns,
+        reencrypted_files,
+        &verify_failures_list,
+    );
+
+    if let Some(ref path) = opts.write_report {
         let report_text = format!("{}\n", serde_json::to_string_pretty(&report)?);
-        fs::write(&path, report_text)
+        fs::write(path, report_text)
             .with_context(|| format!("failed to write migration report {path}"))?;
         if let Some(object) = report.as_object_mut() {
             object.insert("report_written_to".to_string(), serde_json::json!(path));
         }
     }
 
-    if json {
+    if opts.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
@@ -2883,9 +3220,9 @@ fn cmd_migrate_from_git_crypt(
             plan.rewritable_lines,
             plan.ambiguous_lines.len(),
             plan.manual_intervention_lines.len(),
-            dry_run,
+            opts.dry_run,
             reencrypted_files,
-            verify
+            opts.verify
         );
     }
 
@@ -2985,12 +3322,12 @@ fn git_changed_paths(
     paths: &[String],
     cached: bool,
 ) -> Result<std::collections::BTreeSet<String>> {
+    const CHUNK: usize = 100;
     if paths.is_empty() {
         return Ok(std::collections::BTreeSet::new());
     }
 
     let mut dirty = std::collections::BTreeSet::new();
-    const CHUNK: usize = 100;
 
     for chunk in paths.chunks(CHUNK) {
         let mut args = vec!["diff".to_string(), "--name-only".to_string()];
@@ -3066,10 +3403,10 @@ fn read_gitattributes_patterns(repo_root: &std::path::Path) -> Vec<String> {
             if let Some(pattern) = trimmed.split_whitespace().next() {
                 patterns.push(pattern.to_string());
             }
-        } else if trimmed.contains("!filter") || trimmed.contains("!diff") {
-            if let Some(pattern) = trimmed.split_whitespace().next() {
-                patterns.push(format!("!{pattern}"));
-            }
+        } else if (trimmed.contains("!filter") || trimmed.contains("!diff"))
+            && let Some(pattern) = trimmed.split_whitespace().next()
+        {
+            patterns.push(format!("!{pattern}"));
         }
     }
     patterns
@@ -3224,6 +3561,7 @@ fn cmd_rewrap() -> Result<()> {
 }
 
 fn reencrypt_with_current_session(repo_root: &std::path::Path) -> Result<usize> {
+    const CHUNK: usize = 100;
     if repo_key_from_session()?.is_none() {
         anyhow::bail!("repository is locked; run `git-sshripped unlock` first");
     }
@@ -3233,7 +3571,6 @@ fn reencrypt_with_current_session(repo_root: &std::path::Path) -> Result<usize> 
         return Ok(0);
     }
 
-    const CHUNK: usize = 100;
     for chunk in protected.chunks(CHUNK) {
         git_add_paths(repo_root, chunk, true)?;
     }
@@ -3250,7 +3587,7 @@ fn cmd_reencrypt() -> Result<()> {
         return Ok(());
     }
 
-    println!("reencrypt: refreshed {} protected files", refreshed);
+    println!("reencrypt: refreshed {refreshed} protected files");
     Ok(())
 }
 
@@ -3302,7 +3639,7 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
         );
     }
 
-    write_unlock_session(&common_dir, &key, "rotated", Some(key_id.clone()))?;
+    write_unlock_session(&common_dir, &key, "rotated", Some(key_id))?;
 
     println!(
         "rotate-key: generated new repository key and wrapped for {} recipients",
@@ -3311,10 +3648,7 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
     if auto_reencrypt {
         match reencrypt_with_current_session(&repo_root) {
             Ok(count) => {
-                println!(
-                    "rotate-key: auto-reencrypt refreshed {} protected files",
-                    count
-                );
+                println!("rotate-key: auto-reencrypt refreshed {count} protected files");
             }
             Err(err) => {
                 let mut rollback_errors = Vec::new();
@@ -3333,16 +3667,16 @@ fn cmd_rotate_key(auto_reencrypt: bool) -> Result<()> {
                     rollback_errors
                         .push(format!("session rollback failed: {rollback_session_err:#}"));
                 }
-                manifest.repo_key_id = Some(previous_key_id.clone());
+                manifest.repo_key_id = Some(previous_key_id);
                 if let Err(manifest_rollback_err) = write_manifest(&repo_root, &manifest) {
                     rollback_errors.push(format!(
                         "manifest rollback failed: {manifest_rollback_err:#}"
                     ));
                 }
-                if rollback_errors.is_empty() {
-                    if let Err(restore_err) = reencrypt_with_current_session(&repo_root) {
-                        rollback_errors.push(format!("reencrypt rollback failed: {restore_err:#}"));
-                    }
+                if rollback_errors.is_empty()
+                    && let Err(restore_err) = reencrypt_with_current_session(&repo_root)
+                {
+                    rollback_errors.push(format!("reencrypt rollback failed: {restore_err:#}"));
                 }
 
                 if rollback_errors.is_empty() {
@@ -3383,9 +3717,7 @@ fn repo_key_from_session_in(
         let actual = repo_key_id_from_bytes(&key);
         if &actual != expected {
             anyhow::bail!(
-                "unlock session key does not match this worktree manifest (expected repo_key_id {}, got {}); run `git-sshripped unlock`",
-                expected,
-                actual
+                "unlock session key does not match this worktree manifest (expected repo_key_id {expected}, got {actual}); run `git-sshripped unlock`",
             );
         }
     }
@@ -3418,40 +3750,12 @@ fn git_local_config(repo_root: &std::path::Path, key: &str) -> Result<Option<Str
     Ok(Some(value))
 }
 
-fn cmd_doctor(json: bool) -> Result<()> {
-    let mut failures = Vec::new();
-
-    let repo_root = current_repo_root()?;
-    let common_dir = current_common_dir()?;
-    if !json {
-        println!("doctor: repo root {}", repo_root.display());
-        println!("doctor: common dir {}", common_dir.display());
-    }
-
-    let manifest = match read_manifest(&repo_root) {
-        Ok(manifest) => {
-            if !json {
-                println!("check manifest: PASS");
-            }
-            manifest
-        }
-        Err(err) => {
-            if !json {
-                println!("check manifest: FAIL");
-            }
-            failures.push(format!("manifest unreadable: {err:#}"));
-            RepositoryManifest::default()
-        }
-    };
-
-    if manifest.min_recipients == 0 {
-        failures.push("manifest min_recipients must be at least 1".to_string());
-    }
-    if manifest.allowed_key_types.is_empty() {
-        failures.push("manifest allowed_key_types cannot be empty".to_string());
-    }
-
-    let process_cfg = git_local_config(&repo_root, "filter.git-sshripped.process")?;
+fn doctor_check_filters(
+    repo_root: &std::path::Path,
+    json: bool,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let process_cfg = git_local_config(repo_root, "filter.git-sshripped.process")?;
     if process_cfg
         .as_ref()
         .is_some_and(|value| value.contains("filter-process"))
@@ -3466,7 +3770,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         failures.push("filter.git-sshripped.process is missing or invalid".to_string());
     }
 
-    let required_cfg = git_local_config(&repo_root, "filter.git-sshripped.required")?;
+    let required_cfg = git_local_config(repo_root, "filter.git-sshripped.required")?;
     if required_cfg.as_deref() == Some("true") {
         if !json {
             println!("check filter.required: PASS");
@@ -3498,8 +3802,16 @@ fn cmd_doctor(json: bool) -> Result<()> {
             failures.push(format!("cannot read {}: {err}", gitattributes.display()));
         }
     }
+    Ok(())
+}
 
-    let recipients = list_recipients(&repo_root)?;
+fn doctor_check_recipients(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    json: bool,
+    failures: &mut Vec<String>,
+) -> Result<Vec<RecipientKey>> {
+    let recipients = list_recipients(repo_root)?;
     if recipients.is_empty() {
         if !json {
             println!("check recipients: FAIL");
@@ -3509,7 +3821,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         if !json {
             println!("check recipients: PASS ({})", recipients.len());
         }
-        let allowed_types = allowed_key_types_set(&manifest);
+        let allowed_types = allowed_key_types_set(manifest);
         for recipient in &recipients {
             if !allowed_types.contains(recipient.key_type.as_str()) {
                 failures.push(format!(
@@ -3526,21 +3838,27 @@ fn cmd_doctor(json: bool) -> Result<()> {
             manifest.min_recipients
         ));
     }
+    Ok(recipients)
+}
 
-    let wrapped_files = wrapped_key_files(&repo_root)?;
+fn doctor_check_wrapped_keys(
+    repo_root: &std::path::Path,
+    recipients: &[RecipientKey],
+    json: bool,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let wrapped_files = wrapped_key_files(repo_root)?;
     if wrapped_files.is_empty() {
         if !json {
             println!("check wrapped keys: FAIL");
         }
         failures.push("no wrapped keys found".to_string());
-    } else {
-        if !json {
-            println!("check wrapped keys: PASS ({})", wrapped_files.len());
-        }
+    } else if !json {
+        println!("check wrapped keys: PASS ({})", wrapped_files.len());
     }
 
-    for recipient in &recipients {
-        let wrapped = wrapped_store_dir(&repo_root).join(format!("{}.age", recipient.fingerprint));
+    for recipient in recipients {
+        let wrapped = wrapped_store_dir(repo_root).join(format!("{}.age", recipient.fingerprint));
         if !wrapped.exists() {
             failures.push(format!(
                 "missing wrapped key for recipient {}",
@@ -3548,24 +3866,16 @@ fn cmd_doctor(json: bool) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
 
-    let helper = resolve_agent_helper(&repo_root)?;
-    if !json {
-        match &helper {
-            Some((path, source)) => {
-                println!(
-                    "check agent helper: PASS ({} from {})",
-                    path.display(),
-                    source
-                );
-            }
-            None => {
-                println!("check agent helper: PASS (none detected)");
-            }
-        }
-    }
-
-    let session = read_unlock_session(&common_dir)?;
+fn doctor_check_unlock_session(
+    common_dir: &std::path::Path,
+    manifest: &RepositoryManifest,
+    json: bool,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let session = read_unlock_session(common_dir)?;
     if let Some(session) = session {
         let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
             .decode(session.key_b64)
@@ -3588,24 +3898,30 @@ fn cmd_doctor(json: bool) -> Result<()> {
             let actual = repo_key_id_from_bytes(&decoded);
             if &actual != expected {
                 failures.push(format!(
-                    "unlock session repo key mismatch: expected {}, got {}",
-                    expected, actual
+                    "unlock session repo key mismatch: expected {expected}, got {actual}"
                 ));
             }
             if session.repo_key_id.as_deref() != Some(expected.as_str()) {
                 failures.push(format!(
-                    "unlock session metadata repo_key_id mismatch: expected {}, got {}",
-                    expected,
+                    "unlock session metadata repo_key_id mismatch: expected {expected}, got {}",
                     session.repo_key_id.as_deref().unwrap_or("missing")
                 ));
             }
         }
-    } else {
-        if !json {
-            println!("check unlock session: PASS (LOCKED)");
-        }
+    } else if !json {
+        println!("check unlock session: PASS (LOCKED)");
     }
+    Ok(())
+}
 
+fn doctor_output_results(
+    repo_root: &std::path::Path,
+    common_dir: &std::path::Path,
+    manifest: &RepositoryManifest,
+    helper: Option<&(PathBuf, String)>,
+    json: bool,
+    failures: Vec<String>,
+) -> Result<()> {
     if json {
         println!(
             "{}",
@@ -3616,7 +3932,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
                 "algorithm": format!("{:?}", manifest.encryption_algorithm),
                 "strict_mode": manifest.strict_mode,
                 "repo_key_id": manifest.repo_key_id,
-            "protected_patterns": read_gitattributes_patterns(&repo_root),
+                "protected_patterns": read_gitattributes_patterns(repo_root),
                 "min_recipients": manifest.min_recipients,
                 "allowed_key_types": manifest.allowed_key_types,
                 "require_doctor_clean_for_rotate": manifest.require_doctor_clean_for_rotate,
@@ -3636,7 +3952,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         );
         println!(
             "doctor: protected patterns {}",
-            read_gitattributes_patterns(&repo_root).join(", ")
+            read_gitattributes_patterns(repo_root).join(", ")
         );
         println!("doctor: min_recipients {}", manifest.min_recipients);
         println!(
@@ -3674,6 +3990,70 @@ fn cmd_doctor(json: bool) -> Result<()> {
     }
 
     anyhow::bail!("doctor checks failed")
+}
+
+fn cmd_doctor(json: bool) -> Result<()> {
+    let mut failures = Vec::new();
+
+    let repo_root = current_repo_root()?;
+    let common_dir = current_common_dir()?;
+    if !json {
+        println!("doctor: repo root {}", repo_root.display());
+        println!("doctor: common dir {}", common_dir.display());
+    }
+
+    let manifest = match read_manifest(&repo_root) {
+        Ok(manifest) => {
+            if !json {
+                println!("check manifest: PASS");
+            }
+            manifest
+        }
+        Err(err) => {
+            if !json {
+                println!("check manifest: FAIL");
+            }
+            failures.push(format!("manifest unreadable: {err:#}"));
+            RepositoryManifest::default()
+        }
+    };
+
+    if manifest.min_recipients == 0 {
+        failures.push("manifest min_recipients must be at least 1".to_string());
+    }
+    if manifest.allowed_key_types.is_empty() {
+        failures.push("manifest allowed_key_types cannot be empty".to_string());
+    }
+
+    doctor_check_filters(&repo_root, json, &mut failures)?;
+    let recipients = doctor_check_recipients(&repo_root, &manifest, json, &mut failures)?;
+    doctor_check_wrapped_keys(&repo_root, &recipients, json, &mut failures)?;
+
+    let helper = resolve_agent_helper(&repo_root)?;
+    if !json {
+        match &helper {
+            Some((path, source)) => {
+                println!(
+                    "check agent helper: PASS ({} from {})",
+                    path.display(),
+                    source
+                );
+            }
+            None => {
+                println!("check agent helper: PASS (none detected)");
+            }
+        }
+    }
+
+    doctor_check_unlock_session(&common_dir, &manifest, json, &mut failures)?;
+    doctor_output_results(
+        &repo_root,
+        &common_dir,
+        &manifest,
+        helper.as_ref(),
+        json,
+        failures,
+    )
 }
 
 fn read_stdin_all() -> Result<Vec<u8>> {
@@ -3721,8 +4101,8 @@ fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
 
 fn cmd_filter_process() -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current dir")?;
-    let repo_root = resolve_repo_root_for_filter(&cwd)?;
-    let common_dir = resolve_common_dir_for_filter(&cwd)?;
+    let repo_root = resolve_repo_root_for_filter(&cwd);
+    let common_dir = resolve_common_dir_for_filter(&cwd);
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -3771,10 +4151,12 @@ fn cmd_filter_process() -> Result<()> {
             Ok(output) => write_filter_success(&mut writer, &output)?,
             Err(err) => {
                 eprintln!("Error: {err:#}");
-                write_status_only(&mut writer, "error")?
+                write_status_only(&mut writer, "error")?;
             }
         }
     }
+
+    drop(reader);
 
     writer
         .flush()
@@ -3782,27 +4164,27 @@ fn cmd_filter_process() -> Result<()> {
     Ok(())
 }
 
-fn resolve_repo_root_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
+fn resolve_repo_root_for_filter(cwd: &std::path::Path) -> PathBuf {
     if let Some(work_tree) = std::env::var_os("GIT_WORK_TREE") {
         let p = PathBuf::from(work_tree);
         if p.is_absolute() {
-            return Ok(p);
+            return p;
         }
-        return Ok(cwd.join(p));
+        return cwd.join(p);
     }
 
     if std::env::var_os("GIT_DIR").is_some() {
-        return Ok(cwd.to_path_buf());
+        return cwd.to_path_buf();
     }
 
-    Ok(cwd.to_path_buf())
+    cwd.to_path_buf()
 }
 
-fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
+fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> PathBuf {
     if let Some(common_dir) = std::env::var_os("GIT_COMMON_DIR") {
         let p = PathBuf::from(common_dir);
         if p.is_absolute() {
-            return Ok(p);
+            return p;
         }
         if let Some(git_dir) = std::env::var_os("GIT_DIR") {
             let git_dir = PathBuf::from(git_dir);
@@ -3814,9 +4196,9 @@ fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
             let base = git_dir_abs
                 .parent()
                 .map_or_else(|| cwd.to_path_buf(), std::path::Path::to_path_buf);
-            return Ok(base.join(p));
+            return base.join(p);
         }
-        return Ok(cwd.join(p));
+        return cwd.join(p);
     }
 
     if let Some(git_dir) = std::env::var_os("GIT_DIR") {
@@ -3827,24 +4209,24 @@ fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> Result<PathBuf> {
             && let Some(common) = parent.parent()
             && common.join("HEAD").exists()
         {
-            return Ok(common.to_path_buf());
+            return common.to_path_buf();
         }
-        return Ok(git_dir_abs);
+        return git_dir_abs;
     }
 
-    Ok(cwd.join(".git"))
+    cwd.join(".git")
 }
 
 fn resolve_repo_root_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
     if std::env::var_os("GIT_DIR").is_some() {
-        return resolve_repo_root_for_filter(cwd);
+        return Ok(resolve_repo_root_for_filter(cwd));
     }
     git_toplevel(cwd)
 }
 
 fn resolve_common_dir_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
     if std::env::var_os("GIT_DIR").is_some() {
-        return resolve_common_dir_for_filter(cwd);
+        return Ok(resolve_common_dir_for_filter(cwd));
     }
     git_common_dir(cwd)
 }
@@ -4230,7 +4612,7 @@ mod tests {
 
         #[test]
         fn read_pkt_line_rejects_invalid_short_lengths(raw in 1_u8..4_u8) {
-            let len = format!("{:04x}", raw);
+            let len = format!("{raw:04x}");
             let mut cursor = Cursor::new(len.into_bytes());
             let result = read_pkt_line(&mut cursor);
             prop_assert!(result.is_err());
