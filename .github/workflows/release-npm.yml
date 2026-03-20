@@ -108,19 +108,19 @@ jobs:
       - name: Place binaries into npm packages
         run: |
           for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-x64-musl; do
-            cp "artifacts/binary-${pkg}/git-sshripped" "npm/${pkg}/git-sshripped"
-            chmod +x "npm/${pkg}/git-sshripped"
+            cp "artifacts/binary-${pkg}/git-sshripped" "./npm/${pkg}/git-sshripped"
+            chmod +x "./npm/${pkg}/git-sshripped"
           done
-          cp "artifacts/binary-win32-x64/git-sshripped.exe" "npm/win32-x64/git-sshripped.exe"
+          cp "artifacts/binary-win32-x64/git-sshripped.exe" "./npm/win32-x64/git-sshripped.exe"
 
       - name: Verify binaries exist
         run: |
-          ls -la npm/darwin-arm64/git-sshripped
-          ls -la npm/darwin-x64/git-sshripped
-          ls -la npm/linux-arm64/git-sshripped
-          ls -la npm/linux-x64/git-sshripped
-          ls -la npm/linux-x64-musl/git-sshripped
-          ls -la npm/win32-x64/git-sshripped.exe
+          ls -la ./npm/darwin-arm64/git-sshripped
+          ls -la ./npm/darwin-x64/git-sshripped
+          ls -la ./npm/linux-arm64/git-sshripped
+          ls -la ./npm/linux-x64/git-sshripped
+          ls -la ./npm/linux-x64-musl/git-sshripped
+          ls -la ./npm/win32-x64/git-sshripped.exe
 
       - name: Publish platform packages
         if: ${{ !inputs.dry_run }}
@@ -130,7 +130,7 @@ jobs:
           set -euo pipefail
           for pkg in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-x64-musl win32-x64; do
             echo "Publishing @git-sshripped/${pkg}..."
-            npm publish "npm/${pkg}"
+            npm publish "./npm/${pkg}"
           done
 
       - name: Publish main package
@@ -140,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Publishing git-sshripped..."
-          npm publish npm/git-sshripped
+          npm publish ./npm/git-sshripped
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
