@@ -364,13 +364,11 @@ fn dispatch_command(command: Command) -> Result<()> {
             soft,
         } => {
             let result = cmd_unlock(key_hex, identities, github_user, prefer_agent, no_agent);
-            if soft {
-                if let Err(e) = result {
-                    eprintln!(
-                        "warning: git-sshripped unlock failed (--soft mode, continuing anyway): {e:#}"
-                    );
-                    return Ok(());
-                }
+            if soft && let Err(e) = result {
+                eprintln!(
+                    "warning: git-sshripped unlock failed (--soft mode, continuing anyway): {e:#}"
+                );
+                return Ok(());
             }
             result
         }
