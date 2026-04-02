@@ -489,7 +489,30 @@ fn current_common_dir() -> Result<PathBuf> {
     resolve_common_dir_for_command(&cwd)
 }
 
-fn current_bin_path() -> String {
+/// Resolve the binary path to embed in git filter config.
+///
+/// Precedence (first non-empty value wins):
+///   1. `GIT_SSHRIPPED_BIN` environment variable
+///   2. `git-sshripped.binPath` git config (read from the effective config)
+///   3. `std::env::current_exe()` (the running binary)
+///   4. Bare `"git-sshripped"` fallback
+fn current_bin_path(repo_root: Option<&std::path::Path>) -> String {
+    // 1. Environment variable override.
+    if let Ok(val) = std::env::var("GIT_SSHRIPPED_BIN")
+        && !val.is_empty()
+    {
+        return val;
+    }
+
+    // 2. Git config override.
+    if let Some(root) = repo_root
+        && let Ok(Some(val)) = git_effective_config(root, "git-sshripped.binPath")
+        && !val.is_empty()
+    {
+        return val;
+    }
+
+    // 3. Current executable path.
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(ToString::to_string))
@@ -1038,7 +1061,7 @@ fn cmd_init(
     install_gitattributes(&repo_root, patterns)?;
     install_git_filters(
         &repo_root,
-        &current_bin_path(),
+        &current_bin_path(Some(&repo_root)),
         current_is_linked_worktree(&repo_root),
     )?;
 
@@ -1336,7 +1359,7 @@ fn cmd_unlock(
     {
         install_git_filters(
             &repo_root,
-            &current_bin_path(),
+            &current_bin_path(Some(&repo_root)),
             current_is_linked_worktree(&repo_root),
         )?;
         let decrypted_count = checkout_encrypted_worktree_files(&repo_root);
@@ -1378,7 +1401,7 @@ fn cmd_unlock(
     write_unlock_session(&common_dir, &key, &key_source, Some(key_id))?;
     install_git_filters(
         &repo_root,
-        &current_bin_path(),
+        &current_bin_path(Some(&repo_root)),
         current_is_linked_worktree(&repo_root),
     )?;
 
@@ -3002,7 +3025,7 @@ fn cmd_install() -> Result<()> {
     let _manifest = read_manifest(&repo_root)?;
     install_git_filters(
         &repo_root,
-        &current_bin_path(),
+        &current_bin_path(Some(&repo_root)),
         current_is_linked_worktree(&repo_root),
     )?;
     println!("install: refreshed git filter configuration");
@@ -3382,7 +3405,7 @@ fn cmd_migrate_from_git_crypt(opts: &MigrateOptions) -> Result<()> {
         install_gitattributes(&repo_root, &plan.patterns)?;
         install_git_filters(
             &repo_root,
-            &current_bin_path(),
+            &current_bin_path(Some(&repo_root)),
             current_is_linked_worktree(&repo_root),
         )?;
     }
