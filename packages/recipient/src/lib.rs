@@ -125,18 +125,54 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+fn normalize_https_url(url: &str, label: &str) -> Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        bail!("{label} cannot be empty");
+    }
+
+    let parsed =
+        reqwest::Url::parse(trimmed).with_context(|| format!("{label} must be an absolute URL"))?;
+    if parsed.scheme() != "https" {
+        bail!("{label} must use https");
+    }
+    if parsed.host_str().is_none() {
+        bail!("{label} must include a host");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("{label} must not include user info");
+    }
+
+    Ok(parsed.to_string())
+}
+
+fn normalize_https_base_url(url: &str, label: &str) -> Result<String> {
+    Ok(normalize_https_url(url, label)?
+        .trim_end_matches('/')
+        .to_string())
+}
+
+fn normalized_fetch_options(options: &GithubFetchOptions) -> Result<GithubFetchOptions> {
+    Ok(GithubFetchOptions {
+        api_base_url: normalize_https_base_url(&options.api_base_url, "github api base url")?,
+        web_base_url: normalize_https_base_url(&options.web_base_url, "github web base url")?,
+        auth_mode: options.auth_mode,
+        private_source_hard_fail: options.private_source_hard_fail,
+    })
+}
+
 fn fetch_options_from_env() -> Result<GithubFetchOptions> {
     let mut options = GithubFetchOptions::default();
 
     if let Ok(api_base) = std::env::var("GSC_GITHUB_API_BASE")
         && !api_base.trim().is_empty()
     {
-        options.api_base_url = api_base.trim_end_matches('/').to_string();
+        options.api_base_url = normalize_https_base_url(&api_base, "GSC_GITHUB_API_BASE")?;
     }
     if let Ok(web_base) = std::env::var("GSC_GITHUB_WEB_BASE")
         && !web_base.trim().is_empty()
     {
-        options.web_base_url = web_base.trim_end_matches('/').to_string();
+        options.web_base_url = normalize_https_base_url(&web_base, "GSC_GITHUB_WEB_BASE")?;
     }
     if let Ok(mode) = std::env::var("GSC_GITHUB_AUTH_MODE")
         && !mode.trim().is_empty()
@@ -147,7 +183,7 @@ fn fetch_options_from_env() -> Result<GithubFetchOptions> {
         options.private_source_hard_fail = hard_fail;
     }
 
-    Ok(options)
+    normalized_fetch_options(&options)
 }
 
 fn github_web_keys_url(web_base_url: &str, username: &str) -> String {
@@ -239,7 +275,10 @@ fn rest_get_with_retry(
     let mut attempts = 0_u8;
     loop {
         attempts = attempts.saturating_add(1);
-        let request = client.get(url).headers(rest_headers(mode, if_none_match)?);
+        let request_url = normalize_https_url(url, "github request url")?;
+        let request = client
+            .get(&request_url)
+            .headers(rest_headers(mode, if_none_match)?);
         let response = request.send();
 
         match response {
@@ -295,7 +334,7 @@ pub fn fetch_github_user_keys(username: &str) -> Result<GithubUserKeys> {
 
 /// Paginate through the REST API for a user's keys, returning keys and metadata.
 fn rest_paginate_user_keys(
-    username: &str,
+    github_login: &str,
     options: &GithubFetchOptions,
     if_none_match: Option<&str>,
 ) -> Result<(Vec<String>, GithubFetchMetadata, bool)> {
@@ -304,7 +343,7 @@ fn rest_paginate_user_keys(
         .context("failed to build reqwest client")?;
     let mut keys = Vec::new();
     let mut next = Some(format!(
-        "{}/users/{username}/keys?per_page=100",
+        "{}/users/{github_login}/keys?per_page=100",
         options.api_base_url.trim_end_matches('/'),
     ));
     let mut metadata = GithubFetchMetadata::default();
@@ -313,7 +352,7 @@ fn rest_paginate_user_keys(
     while let Some(url) = next {
         let current_if_none_match = if applied_etag { None } else { if_none_match };
         let resp = rest_get_with_retry(&client, &url, options.auth_mode, current_if_none_match)
-            .with_context(|| format!("failed to fetch GitHub user keys for {username}"))?;
+            .with_context(|| format!("failed to fetch GitHub user keys for {github_login}"))?;
         if resp.status() == StatusCode::NOT_MODIFIED {
             metadata.not_modified = true;
             return Ok((Vec::new(), metadata, true));
@@ -322,7 +361,7 @@ fn rest_paginate_user_keys(
             && (resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN)
         {
             bail!(
-                "GitHub user keys request failed for {username} (status {}); provide GITHUB_TOKEN or gh auth",
+                "GitHub user keys request failed for {github_login} (status {}); provide GITHUB_TOKEN or gh auth",
                 resp.status()
             );
         }
@@ -348,7 +387,7 @@ fn rest_paginate_user_keys(
 
         let resp = resp
             .error_for_status()
-            .with_context(|| format!("GitHub user keys request failed for {username}"))?;
+            .with_context(|| format!("GitHub user keys request failed for {github_login}"))?;
         let text = resp
             .text()
             .context("failed to read GitHub user keys response")?;
@@ -373,10 +412,12 @@ fn rest_paginate_user_keys(
 /// Returns an error if the GitHub API request fails, the `gh` CLI is required
 /// but not installed, or the response cannot be parsed.
 pub fn fetch_github_user_keys_with_options(
-    username: &str,
+    github_login: &str,
     options: &GithubFetchOptions,
     if_none_match: Option<&str>,
 ) -> Result<GithubUserKeys> {
+    let options = normalized_fetch_options(options)?;
+
     let use_gh = match options.auth_mode {
         GithubAuthMode::Auto => gh_installed(),
         GithubAuthMode::Gh => {
@@ -389,10 +430,10 @@ pub fn fetch_github_user_keys_with_options(
     };
 
     if use_gh {
-        let keys = gh_api_lines(&format!("users/{username}/keys"), ".[].key", true)?;
+        let keys = gh_api_lines(&format!("users/{github_login}/keys"), ".[].key", true)?;
         return Ok(GithubUserKeys {
-            username: username.to_string(),
-            url: github_web_keys_url(&options.web_base_url, username),
+            username: github_login.to_string(),
+            url: github_web_keys_url(&options.web_base_url, github_login),
             keys,
             backend: GithubBackend::Gh,
             authenticated: true,
@@ -402,11 +443,11 @@ pub fn fetch_github_user_keys_with_options(
     }
 
     let (keys, metadata, _early_return) =
-        rest_paginate_user_keys(username, options, if_none_match)?;
+        rest_paginate_user_keys(github_login, &options, if_none_match)?;
 
     Ok(GithubUserKeys {
-        username: username.to_string(),
-        url: github_web_keys_url(&options.web_base_url, username),
+        username: github_login.to_string(),
+        url: github_web_keys_url(&options.web_base_url, github_login),
         keys,
         backend: GithubBackend::Rest,
         authenticated: rest_authenticated(options.auth_mode),
@@ -441,6 +482,8 @@ pub fn fetch_github_team_members_with_options(
     options: &GithubFetchOptions,
     if_none_match: Option<&str>,
 ) -> Result<GithubTeamMembers> {
+    let options = normalized_fetch_options(options)?;
+
     let use_gh = match options.auth_mode {
         GithubAuthMode::Auto => gh_installed(),
         GithubAuthMode::Gh => {
@@ -729,19 +772,21 @@ pub fn add_recipients_from_github_source_with_options(
     username: Option<&str>,
     options: &GithubFetchOptions,
 ) -> Result<Vec<RecipientKey>> {
+    let options = normalized_fetch_options(options)?;
     if let Some(user) = username {
-        return add_recipients_from_github_username_with_options(repo_root, user, options);
+        return add_recipients_from_github_username_with_options(repo_root, user, &options);
     }
 
+    let source_url = normalize_https_url(url, "github source url")?;
     let text = reqwest::blocking::Client::builder()
         .build()
         .context("failed to build reqwest client")?
-        .get(url)
+        .get(&source_url)
         .headers(rest_headers(options.auth_mode, None)?)
         .send()
-        .with_context(|| format!("failed to GET {url}"))?
+        .with_context(|| format!("failed to GET {source_url}"))?
         .error_for_status()
-        .with_context(|| format!("GitHub keys request returned error for {url}"))?
+        .with_context(|| format!("GitHub keys request returned error for {source_url}"))?
         .text()
         .context("failed to read GitHub keys body")?;
 
@@ -751,7 +796,7 @@ pub fn add_recipients_from_github_source_with_options(
             repo_root,
             line,
             RecipientSource::GithubKeys {
-                url: url.to_string(),
+                url: source_url.clone(),
                 username: username.map(ToString::to_string),
             },
         )

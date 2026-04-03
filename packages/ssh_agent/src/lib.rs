@@ -103,7 +103,7 @@ fn sign_payload(challenge: &[u8]) -> Vec<u8> {
 /// Derive a 32-byte `ChaCha20Poly1305` key from an Ed25519 signature.
 fn derive_wrap_key(signature_bytes: &[u8], challenge: &[u8]) -> Result<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(challenge), signature_bytes);
-    let mut key = [0u8; 32];
+    let mut key: [u8; 32] = rand::random();
     hk.expand(HKDF_INFO, &mut key)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(key)

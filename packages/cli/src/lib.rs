@@ -711,14 +711,41 @@ fn parse_github_auth_mode(raw: &str) -> Result<GithubAuthMode> {
     }
 }
 
+fn normalize_https_url(url: &str, label: &str) -> Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{label} cannot be empty");
+    }
+
+    let parsed =
+        reqwest::Url::parse(trimmed).with_context(|| format!("{label} must be an absolute URL"))?;
+    if parsed.scheme() != "https" {
+        anyhow::bail!("{label} must use https");
+    }
+    if parsed.host_str().is_none() {
+        anyhow::bail!("{label} must include a host");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("{label} must not include user info");
+    }
+
+    Ok(parsed.to_string())
+}
+
+fn normalize_https_base_url(url: &str, label: &str) -> Result<String> {
+    Ok(normalize_https_url(url, label)?
+        .trim_end_matches('/')
+        .to_string())
+}
+
 fn github_fetch_options(repo_root: &std::path::Path) -> Result<GithubFetchOptions> {
     let cfg = read_local_config(repo_root)?;
     let mut options = GithubFetchOptions::default();
     if let Some(api_base) = cfg.github_api_base {
-        options.api_base_url = api_base.trim_end_matches('/').to_string();
+        options.api_base_url = normalize_https_base_url(&api_base, "github_api_base")?;
     }
     if let Some(web_base) = cfg.github_web_base {
-        options.web_base_url = web_base.trim_end_matches('/').to_string();
+        options.web_base_url = normalize_https_base_url(&web_base, "github_web_base")?;
     }
     if let Some(mode) = cfg.github_auth_mode {
         options.auth_mode = parse_github_auth_mode(&mode)?;
@@ -1724,11 +1751,7 @@ fn cmd_add_user(
             &username,
             &github_options,
         )?;
-        println!(
-            "added {} recipients from github user {}",
-            added.len(),
-            username
-        );
+        println!("added {} recipients from github user source", added.len());
         new_recipients.extend(added);
     }
 
@@ -1994,12 +2017,17 @@ fn cmd_add_github_user(
                 lower.starts_with("http://") || lower.starts_with("https://")
             } =>
         {
-            let contents = reqwest::blocking::get(&source)
-                .with_context(|| format!("failed to fetch key from '{source}'"))?
+            let source_url = normalize_https_url(&source, "--key-file URL")?;
+            let contents = reqwest::blocking::Client::builder()
+                .build()
+                .context("failed to build reqwest client")?
+                .get(&source_url)
+                .send()
+                .with_context(|| format!("failed to fetch key from '{source_url}'"))?
                 .error_for_status()
-                .with_context(|| format!("HTTP error fetching key from '{source}'"))?
+                .with_context(|| format!("HTTP error fetching key from '{source_url}'"))?
                 .text()
-                .with_context(|| format!("failed to read response body from '{source}'"))?;
+                .with_context(|| format!("failed to read response body from '{source_url}'"))?;
             Some(contents.trim().to_string())
         }
         (_, Some(path)) => {
@@ -2029,7 +2057,7 @@ fn cmd_add_github_user(
         .collect();
 
     println!(
-        "add-github-user: fetched {} keys for {username}",
+        "add-github-user: fetched {} keys from github source",
         fetched_keys.len()
     );
 
@@ -2069,7 +2097,7 @@ fn cmd_add_github_user(
     )?;
 
     println!(
-        "add-github-user: added source for {username} ({} recipient(s))",
+        "add-github-user: added source ({} recipient(s))",
         recipients.len()
     );
     Ok(())
@@ -2172,8 +2200,7 @@ fn cmd_list_github_users(verbose: bool) -> Result<()> {
     for source in registry.users {
         if verbose {
             println!(
-                "username={} url={} fingerprints={} refreshed={} status={} message={}",
-                source.username,
+                "url={} fingerprints={} refreshed={} status={} message={}",
                 source.url,
                 source.fingerprints.len(),
                 source.last_refreshed_unix,
@@ -2184,7 +2211,7 @@ fn cmd_list_github_users(verbose: bool) -> Result<()> {
                 source.last_refresh_message.as_deref().unwrap_or("none")
             );
         } else {
-            println!("{}", source.username);
+            println!("{}", source.url);
         }
     }
     Ok(())
@@ -2229,7 +2256,7 @@ fn cmd_remove_github_user(username: &str, force: bool) -> Result<()> {
 
     registry.users.retain(|entry| entry.username != username);
     write_github_sources(&repo_root, &registry)?;
-    println!("remove-github-user: removed source for {username}");
+    println!("remove-github-user: removed github user source");
     Ok(())
 }
 
@@ -2301,11 +2328,9 @@ fn cmd_list_github_teams() -> Result<()> {
     }
     for source in registry.teams {
         println!(
-            "{}/{} members={} fingerprints={} refreshed={} status={} message={}",
+            "{}/{} refreshed={} status={} message={}",
             source.org,
             source.team,
-            source.member_usernames.len(),
-            source.fingerprints.len(),
             source.last_refreshed_unix,
             source
                 .last_refresh_status_code
@@ -3048,7 +3073,8 @@ fn cmd_config(command: ConfigCommand) -> Result<()> {
         }
         ConfigCommand::SetGithubApiBase { url } => {
             let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
-            cfg.github_api_base = Some(url.trim_end_matches('/').to_string());
+            let normalized = normalize_https_base_url(&url, "set-github-api-base")?;
+            cfg.github_api_base = Some(normalized);
             write_local_config(&repo_root, &cfg)?;
             println!(
                 "config: set github api base to {}",
@@ -3058,7 +3084,8 @@ fn cmd_config(command: ConfigCommand) -> Result<()> {
         }
         ConfigCommand::SetGithubWebBase { url } => {
             let mut cfg: RepositoryLocalConfig = read_local_config(&repo_root)?;
-            cfg.github_web_base = Some(url.trim_end_matches('/').to_string());
+            let normalized = normalize_https_base_url(&url, "set-github-web-base")?;
+            cfg.github_web_base = Some(normalized);
             write_local_config(&repo_root, &cfg)?;
             println!(
                 "config: set github web base to {}",
