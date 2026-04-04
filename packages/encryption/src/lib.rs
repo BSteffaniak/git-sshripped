@@ -2,11 +2,16 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+
+#[cfg(feature = "crypto-aes-siv")]
+use anyhow::Context;
 use git_sshripped_encryption_models::{
     ENCRYPTED_MAGIC, EncryptedHeader, EncryptionAlgorithm, EncryptionModelsError,
 };
+#[cfg(feature = "crypto-aes-siv")]
 use hkdf::Hkdf;
+#[cfg(feature = "crypto-aes-siv")]
 use sha2::Sha256;
 use thiserror::Error;
 
@@ -27,6 +32,7 @@ pub enum EncryptionError {
     UnsupportedAlgorithm(EncryptionAlgorithm),
 }
 
+#[cfg(feature = "crypto-aes-siv")]
 fn derive_key_material(repo_key: &[u8]) -> Result<[u8; 64]> {
     let hk = Hkdf::<Sha256>::new(Some(b"git-sshripped:aes-siv:v1"), repo_key);
     let mut out = [0_u8; 64];

@@ -55,4 +55,18 @@ ssh-identity = ["dep:git_sshripped_ssh_identity"]
 ssh-identity-models = ["dep:git_sshripped_ssh_identity_models"]
 worktree = ["dep:git_sshripped_worktree"]
 worktree-models = ["dep:git_sshripped_worktree_models"]
-fail-on-warnings = []
+fail-on-warnings = [
+  "git_sshripped_cli_models/fail-on-warnings",
+  "git_sshripped_encryption/fail-on-warnings",
+  "git_sshripped_encryption_models/fail-on-warnings",
+  "git_sshripped_filter/fail-on-warnings",
+  "git_sshripped_filter_models/fail-on-warnings",
+  "git_sshripped_recipient/fail-on-warnings",
+  "git_sshripped_recipient_models/fail-on-warnings",
+  "git_sshripped_repository/fail-on-warnings",
+  "git_sshripped_repository_models/fail-on-warnings",
+  "git_sshripped_ssh_identity/fail-on-warnings",
+  "git_sshripped_ssh_identity_models/fail-on-warnings",
+  "git_sshripped_worktree/fail-on-warnings",
+  "git_sshripped_worktree_models/fail-on-warnings",
+]

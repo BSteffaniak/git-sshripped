@@ -16,3 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 git_sshripped_cli = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = ["git_sshripped_cli/fail-on-warnings"]

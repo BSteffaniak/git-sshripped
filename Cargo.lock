@@ -887,7 +887,6 @@ dependencies = [
  "anyhow",
  "git_sshripped_encryption",
  "git_sshripped_encryption_models",
- "git_sshripped_filter_models",
 ]
 
 [[package]]

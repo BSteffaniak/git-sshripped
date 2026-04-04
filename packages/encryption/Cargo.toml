@@ -22,7 +22,7 @@ aes-siv = { workspace = true, optional = true, features = ["std"] }
 
 [features]
 default = ["crypto-aes-siv"]
-fail-on-warnings = []
+fail-on-warnings = ["git_sshripped_encryption_models/fail-on-warnings"]
 crypto-aes-siv = ["dep:aes-siv"]
 
 [dev-dependencies]

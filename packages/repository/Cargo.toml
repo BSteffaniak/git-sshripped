@@ -18,4 +18,7 @@ toml = { workspace = true, features = ["display", "parse"] }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = [
+  "git_sshripped_repository_models/fail-on-warnings",
+  "git_sshripped_ssh_agent_models/fail-on-warnings",
+]
