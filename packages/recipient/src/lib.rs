@@ -261,9 +261,7 @@ fn rest_authenticated(mode: GithubAuthMode) -> bool {
     if mode == GithubAuthMode::Anonymous {
         return false;
     }
-    std::env::var("GITHUB_TOKEN")
-        .map(|token| !token.trim().is_empty())
-        .unwrap_or(false)
+    std::env::var("GITHUB_TOKEN").is_ok_and(|token| !token.trim().is_empty())
 }
 
 fn rest_get_with_retry(
