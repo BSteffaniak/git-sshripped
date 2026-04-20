@@ -1505,9 +1505,7 @@ fn checkout_encrypted_worktree_files(repo_root: &std::path::Path) -> usize {
         .iter()
         .filter(|path| {
             let full = repo_root.join(path);
-            fs::read(&full)
-                .map(|c| c.starts_with(&ENCRYPTED_MAGIC))
-                .unwrap_or(false)
+            fs::read(&full).is_ok_and(|c| c.starts_with(&ENCRYPTED_MAGIC))
         })
         .map(String::as_str)
         .collect();
