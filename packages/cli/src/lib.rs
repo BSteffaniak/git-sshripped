@@ -1392,7 +1392,10 @@ fn agent_aware_unlock_error(repo_root: &std::path::Path) -> anyhow::Error {
                  agent-wrap file or on-disk private key was found; \
                  bootstrap with: unlock --key-hex <HEX> (obtain from \
                  a collaborator via export-repo-key), then future \
-                 unlocks will use the agent automatically",
+                 unlocks will use the agent automatically\n\
+                 collaborator steps: unlock the repo, run \
+                 `git-sshripped export-repo-key --out /tmp/repo-key.txt`, \
+                 share that file securely, then delete it",
                 fingerprints.join(", ")
             )
         },
