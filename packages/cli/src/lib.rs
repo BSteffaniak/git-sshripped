@@ -30,9 +30,7 @@ use git_sshripped_repository_models::{
     GithubSourceRegistry, GithubTeamSource, GithubUserSource, RepositoryLocalConfig,
     RepositoryManifest,
 };
-use git_sshripped_ssh_agent::{
-    agent_unwrap_repo_key, agent_wrap_repo_key, list_agent_ed25519_keys,
-};
+use git_sshripped_ssh_agent::{agent_unwrap_repo_key, agent_wrap_repo_key, list_agent_keys};
 use git_sshripped_ssh_identity::{
     default_private_key_candidates, detect_identity, discover_ssh_key_files,
     private_keys_matching_agent, unwrap_repo_key_from_wrapped_files,
@@ -1182,7 +1180,7 @@ fn cmd_init(
 ///
 /// Returns an error on I/O failures after a successful agent connection.
 fn try_agent_wrap_unlock(common_dir: &std::path::Path) -> Result<Option<(Vec<u8>, String)>> {
-    let agent_keys = match list_agent_ed25519_keys() {
+    let agent_keys = match list_agent_keys() {
         Ok(keys) if !keys.is_empty() => keys,
         _ => return Ok(None),
     };
@@ -1222,7 +1220,7 @@ fn generate_missing_agent_wraps(
     common_dir: &std::path::Path,
     repo_key: &[u8],
 ) {
-    let agent_keys = match list_agent_ed25519_keys() {
+    let agent_keys = match list_agent_keys() {
         Ok(keys) if !keys.is_empty() => keys,
         _ => return,
     };
@@ -1359,12 +1357,46 @@ fn unwrap_repo_key_from_identities(
         let Some((unwrapped, descriptor)) =
             unwrap_repo_key_from_wrapped_files(&wrapped_files, &identity_files, &interactive_set)?
         else {
-            anyhow::bail!(
-                "could not decrypt any wrapped key with agent helper or provided identity files; set GSC_SSH_AGENT_HELPER for true ssh-agent decrypt, or pass --identity"
-            );
+            return Err(agent_aware_unlock_error(repo_root));
         };
         Ok((unwrapped, descriptor.label))
     }
+}
+
+fn agent_aware_unlock_error(repo_root: &std::path::Path) -> anyhow::Error {
+    let agent_recipient_match = list_agent_keys().ok().and_then(|agent_keys| {
+        let recipients = list_recipients(repo_root).ok()?;
+        let matched: Vec<_> = agent_keys
+            .iter()
+            .filter(|ak| recipients.iter().any(|r| r.fingerprint == ak.fingerprint))
+            .map(|ak| ak.fingerprint.clone())
+            .collect();
+        if matched.is_empty() {
+            None
+        } else {
+            Some(matched)
+        }
+    });
+
+    agent_recipient_match.map_or_else(
+        || {
+            anyhow::anyhow!(
+                "could not decrypt any wrapped key with agent helper \
+                 or provided identity files; pass --identity or set \
+                 GSC_SSH_AGENT_HELPER"
+            )
+        },
+        |fingerprints| {
+            anyhow::anyhow!(
+                "your SSH agent has key(s) matching recipient(s) [{}] but no \
+                 agent-wrap file or on-disk private key was found; \
+                 bootstrap with: unlock --key-hex <HEX> (obtain from \
+                 a collaborator via export-repo-key), then future \
+                 unlocks will use the agent automatically",
+                fingerprints.join(", ")
+            )
+        },
+    )
 }
 
 fn cmd_unlock(

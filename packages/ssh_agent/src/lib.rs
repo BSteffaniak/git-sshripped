@@ -65,7 +65,8 @@ pub fn fingerprint_for_public_key_line(openssh_line: &str) -> Option<String> {
     Some(BASE64URL.encode(hasher.finalize()))
 }
 
-/// Connect to the SSH agent and list all available Ed25519 keys.
+/// Connect to the SSH agent and list all available keys that
+/// git-sshripped supports (Ed25519 and RSA).
 ///
 /// Returns an empty vec if `SSH_AUTH_SOCK` is not set or the agent is
 /// unreachable.
@@ -75,7 +76,7 @@ pub fn fingerprint_for_public_key_line(openssh_line: &str) -> Option<String> {
 /// Returns an error only on unexpected I/O failures *after* a successful
 /// connection.  A missing `SSH_AUTH_SOCK` or connection refusal is treated
 /// as "no agent" and returns `Ok(vec![])`.
-pub fn list_agent_ed25519_keys() -> Result<Vec<AgentKey>> {
+pub fn list_agent_keys() -> Result<Vec<AgentKey>> {
     let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") else {
         return Ok(Vec::new());
     };
@@ -93,7 +94,7 @@ pub fn list_agent_ed25519_keys() -> Result<Vec<AgentKey>> {
             ssh_agent_client_rs::Identity::PublicKey(boxed_cow) => boxed_cow.as_ref(),
             ssh_agent_client_rs::Identity::Certificate(_) => continue,
         };
-        if !matches!(pubkey.key_data(), KeyData::Ed25519(_)) {
+        if !matches!(pubkey.key_data(), KeyData::Ed25519(_) | KeyData::Rsa(_)) {
             continue;
         }
         let openssh_line = pubkey
@@ -157,8 +158,7 @@ pub fn sign_challenge_with_agent_key(
 /// Sign a challenge with the best available SSH agent key.
 ///
 /// Prefers keys whose fingerprints are listed in `preferred_fingerprints`.
-/// If no preference matches, falls back to the first available Ed25519 agent
-/// key.
+/// If no preference matches, falls back to the first available agent key.
 ///
 /// # Errors
 ///
@@ -169,7 +169,7 @@ pub fn sign_challenge_with_any_agent_key(
     namespace: &str,
     preferred_fingerprints: &[String],
 ) -> Result<Option<ChallengeProof>> {
-    let agent_keys = list_agent_ed25519_keys()?;
+    let agent_keys = list_agent_keys()?;
     if agent_keys.is_empty() {
         return Ok(None);
     }
@@ -233,7 +233,7 @@ pub fn verify_challenge_signature(
         .context("SSH challenge signature verification failed")
 }
 
-/// Derive a 32-byte `ChaCha20Poly1305` key from an Ed25519 signature.
+/// Derive a 32-byte `ChaCha20Poly1305` key from an SSH agent signature.
 fn derive_wrap_key(signature_bytes: &[u8], challenge: &[u8]) -> Result<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(challenge), signature_bytes);
     let mut key: [u8; 32] = rand::random();
@@ -313,7 +313,7 @@ pub fn agent_unwrap_repo_key(
 fn sign_with_agent(agent_key: &AgentKey, challenge: &[u8]) -> Result<Vec<u8>> {
     let payload = sign_payload(challenge);
     let signature = sign_message_with_agent(agent_key, &payload)?;
-    Ok(extract_ed25519_signature_bytes(&signature))
+    Ok(extract_signature_bytes(&signature))
 }
 
 /// Ask the SSH agent to sign raw bytes with the given key.
@@ -331,11 +331,12 @@ fn sign_message_with_agent(agent_key: &AgentKey, payload: &[u8]) -> Result<ssh_k
     Ok(signature)
 }
 
-/// Extract the raw 64-byte Ed25519 signature from the SSH wire format.
+/// Extract the raw signature bytes from the SSH wire format.
 ///
 /// The `ssh-key` crate's `Signature` contains algorithm-prefixed data;
-/// for Ed25519 the raw bytes are the 64-byte signature itself.
-fn extract_ed25519_signature_bytes(sig: &ssh_key::Signature) -> Vec<u8> {
+/// `as_bytes()` returns the raw signature bytes for any key type
+/// (64 bytes for Ed25519, variable length for RSA).
+fn extract_signature_bytes(sig: &ssh_key::Signature) -> Vec<u8> {
     sig.as_bytes().to_vec()
 }
 
