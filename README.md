@@ -80,13 +80,15 @@ git-sshripped lock
 - `git-sshripped unlock [--identity <path>] [--github-user <user>] [--prefer-agent] [--no-agent]`
 
 `unlock` auto-resolves an agent helper in this order:
-1) `GSC_SSH_AGENT_HELPER` env var
-2) `git config --local git-sshripped.agentHelper`
-3) `.git-sshripped/config.toml` (`agent_helper`)
-4) PATH search (`git-sshripped-agent-helper`, `age-plugin-ssh-agent`, `age-plugin-ssh`)
+
+1. `GSC_SSH_AGENT_HELPER` env var
+2. `git config --local git-sshripped.agentHelper`
+3. `.git-sshripped/config.toml` (`agent_helper`)
+4. PATH search (`git-sshripped-agent-helper`, `age-plugin-ssh-agent`, `age-plugin-ssh`)
 
 Helper contract: `<helper> <wrapped-key-file>` -> stdout with decrypted 32-byte
 repo key (raw bytes or 64-char hex).
+
 - `git-sshripped lock`
 - `git-sshripped status`
 - `git-sshripped doctor [--json]`
@@ -137,6 +139,48 @@ repo key (raw bytes or 64-char hex).
 - `git-sshripped config set-github-auth-mode <auto|gh|token|anonymous>`
 - `git-sshripped config set-github-private-source-hard-fail <true|false>`
 - `git-sshripped config show`
+
+## Debugging performance
+
+`git-sshripped` ships optional span-level timing via the
+[`profiling`](https://crates.io/crates/profiling) crate with a
+`tracing`-backed subscriber. When disabled (the default) the instrumentation
+compiles to no-ops and adds zero runtime cost; enable it only when you need
+to investigate where time goes during a command.
+
+### Enable tracing
+
+Build a release binary with the `profile-trace` feature:
+
+```bash
+cargo build --release --features git_sshripped_cli/profile-trace
+```
+
+Then run any subcommand with `GIT_SSHRIPPED_TRACE=1` set. Span entries and
+their durations are written to stderr:
+
+```bash
+GIT_SSHRIPPED_TRACE=1 ./target/release/git-sshripped unlock --soft 2>trace.log
+```
+
+`RUST_LOG` is respected if you want to narrow which spans are emitted (for
+example `RUST_LOG='info'`).
+
+### Run the benchmarks
+
+The `packages/cli/benches/unlock.rs` harness uses
+[`criterion`](https://crates.io/crates/criterion) to measure the real-world
+cost of `unlock --soft` against a live repository. Real-repo benches are
+opt-in via environment variables so CI stays cheap:
+
+```bash
+export BENCH_REPO=$HOME/GitHub/monorepo             # an already-unlocked sshripped repo
+export GIT_SSHRIPPED_BIN=$PWD/target/release/git-sshripped
+cargo bench -p git_sshripped_cli --features profile-trace
+```
+
+Benches that require a missing variable print `skipping` and return, so it
+is safe to run the harness without setting them.
 
 ## Security notes
 

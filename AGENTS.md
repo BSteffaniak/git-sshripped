@@ -52,3 +52,25 @@ Key implications:
   logic.
 - Helper functions extracted from long functions should be private (`fn`, not
   `pub fn`) and placed adjacent to the function they were extracted from.
+
+## Debugging performance
+
+Span-level instrumentation is available via the [`profiling`](https://crates.io/crates/profiling)
+crate. Use it to investigate latency in any command (for example why
+`unlock --soft` is slower than expected) without guessing.
+
+Build with the `profile-trace` feature and set `GIT_SSHRIPPED_TRACE=1` at
+run time:
+
+```bash
+cargo build --release --features git_sshripped_cli/profile-trace
+GIT_SSHRIPPED_TRACE=1 ./target/release/git-sshripped <subcommand> 2>trace.log
+```
+
+Benchmarks live in `packages/cli/benches/unlock.rs` (criterion harness).
+They are opt-in via `BENCH_REPO` and `GIT_SSHRIPPED_BIN` env vars so CI stays
+cheap. See README.md's _Debugging performance_ section for full usage.
+
+When adding new subprocess spawns or hot helpers, wrap them in
+`profiling::scope!("name")` so the trace output stays comprehensive. The
+macro compiles to a no-op when the `profile-trace` feature is off.

@@ -18,6 +18,7 @@ pub fn clean(
     path: &str,
     content: &[u8],
 ) -> Result<Vec<u8>> {
+    profiling::scope!("clean");
     if is_encrypted(content) {
         return Ok(content.to_vec());
     }
@@ -37,6 +38,7 @@ pub fn clean(
 /// Returns an error if decryption fails. When the repository is locked,
 /// ciphertext is passed through unchanged.
 pub fn smudge(repo_key: Option<&[u8]>, path: &str, content: &[u8]) -> Result<Vec<u8>> {
+    profiling::scope!("smudge");
     if !is_encrypted(content) {
         return Ok(content.to_vec());
     }
@@ -55,6 +57,7 @@ pub fn smudge(repo_key: Option<&[u8]>, path: &str, content: &[u8]) -> Result<Vec
 /// Returns an error if the repository is locked and the content is encrypted,
 /// or if decryption fails.
 pub fn diff(repo_key: Option<&[u8]>, path: &str, content: &[u8]) -> Result<Vec<u8>> {
+    profiling::scope!("diff");
     if !is_encrypted(content) {
         return Ok(content.to_vec());
     }

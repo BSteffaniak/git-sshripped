@@ -13,6 +13,7 @@ use base64::Engine;
 use git_sshripped_worktree_models::UnlockSession;
 
 fn git_rev_parse(cwd: &Path, arg: &str) -> Result<PathBuf> {
+    profiling::scope!("git rev-parse", arg);
     let output = Command::new("git")
         .args(["rev-parse", arg])
         .current_dir(cwd)
@@ -36,6 +37,7 @@ fn git_rev_parse(cwd: &Path, arg: &str) -> Result<PathBuf> {
 ///
 /// Returns an error if `git rev-parse --git-common-dir` fails.
 pub fn git_common_dir(cwd: &Path) -> Result<PathBuf> {
+    profiling::scope!("git_common_dir");
     git_rev_parse(cwd, "--git-common-dir")
 }
 
@@ -49,6 +51,7 @@ pub fn git_common_dir(cwd: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error if `git rev-parse --git-dir` fails.
 pub fn git_dir(cwd: &Path) -> Result<PathBuf> {
+    profiling::scope!("git_dir");
     git_rev_parse(cwd, "--git-dir")
 }
 
@@ -58,6 +61,7 @@ pub fn git_dir(cwd: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error if `git rev-parse --show-toplevel` fails.
 pub fn git_toplevel(cwd: &Path) -> Result<PathBuf> {
+    profiling::scope!("git_toplevel");
     git_rev_parse(cwd, "--show-toplevel")
 }
 
@@ -72,6 +76,7 @@ pub fn git_toplevel(cwd: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error if the underlying `git rev-parse` calls fail.
 pub fn is_linked_worktree(cwd: &Path) -> Result<bool> {
+    profiling::scope!("is_linked_worktree");
     let git_dir_raw = git_dir(cwd)?;
     let common_dir_raw = git_common_dir(cwd)?;
 
@@ -114,6 +119,7 @@ pub fn write_unlock_session(
     key_source: &str,
     repo_key_id: Option<String>,
 ) -> Result<()> {
+    profiling::scope!("write_unlock_session");
     let file = session_file(common_dir);
     let parent = file
         .parent()
@@ -150,6 +156,7 @@ pub fn write_unlock_session(
 ///
 /// Returns an error if the session file exists but cannot be removed.
 pub fn clear_unlock_session(common_dir: &Path) -> Result<()> {
+    profiling::scope!("clear_unlock_session");
     let file = session_file(common_dir);
     if file.exists() {
         fs::remove_file(&file)
@@ -164,6 +171,7 @@ pub fn clear_unlock_session(common_dir: &Path) -> Result<()> {
 ///
 /// Returns an error if the session file exists but cannot be read or parsed.
 pub fn read_unlock_session(common_dir: &Path) -> Result<Option<UnlockSession>> {
+    profiling::scope!("read_unlock_session");
     let file = session_file(common_dir);
     if !file.exists() {
         return Ok(None);

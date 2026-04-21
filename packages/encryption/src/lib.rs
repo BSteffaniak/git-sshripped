@@ -58,6 +58,7 @@ pub fn encrypt(
     path: &str,
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
+    profiling::scope!("encrypt");
     if is_encrypted(plaintext) {
         return Ok(plaintext.to_vec());
     }
@@ -74,6 +75,7 @@ pub fn encrypt(
 /// Returns an error if the header is invalid, the algorithm is unsupported,
 /// or decryption fails (wrong key or tampered ciphertext).
 pub fn decrypt(repo_key: &[u8], path: &str, encrypted: &[u8]) -> Result<Vec<u8>> {
+    profiling::scope!("decrypt");
     let (header, ciphertext) = parse_header(encrypted)?;
 
     match header.algorithm {

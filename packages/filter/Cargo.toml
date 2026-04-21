@@ -14,6 +14,7 @@ version = { workspace = true }
 git_sshripped_encryption = { workspace = true }
 git_sshripped_encryption_models = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
+profiling = { workspace = true }
 
 [features]
 default = []

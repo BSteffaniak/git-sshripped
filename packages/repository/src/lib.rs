@@ -38,6 +38,7 @@ pub fn local_config_file(repo_root: &Path) -> PathBuf {
 /// Returns an error if the metadata directory cannot be created, the manifest
 /// cannot be serialized, or the file cannot be written.
 pub fn write_manifest(repo_root: &Path, manifest: &RepositoryManifest) -> Result<()> {
+    profiling::scope!("write_manifest");
     let dir = metadata_dir(repo_root);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create metadata directory {}", dir.display()))?;
@@ -53,6 +54,7 @@ pub fn write_manifest(repo_root: &Path, manifest: &RepositoryManifest) -> Result
 ///
 /// Returns an error if the file cannot be read or parsed.
 pub fn read_manifest(repo_root: &Path) -> Result<RepositoryManifest> {
+    profiling::scope!("read_manifest");
     let file = manifest_file(repo_root);
     let text = fs::read_to_string(&file)
         .with_context(|| format!("failed to read manifest {}", file.display()))?;
@@ -129,6 +131,7 @@ pub fn write_local_config(repo_root: &Path, config: &RepositoryLocalConfig) -> R
 ///
 /// Returns an error if the `.gitattributes` file cannot be read or written.
 pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()> {
+    profiling::scope!("install_gitattributes");
     let path = repo_root.join(".gitattributes");
     let mut existing = if path.exists() {
         fs::read_to_string(&path)
@@ -190,9 +193,11 @@ fn shell_quote(s: &str) -> String {
 ///
 /// Returns an error if any `git config` command fails.
 pub fn install_git_filters(repo_root: &Path, bin: &str, linked_worktree: bool) -> Result<()> {
+    profiling::scope!("install_git_filters");
     // When writing to a linked worktree, ensure the worktreeConfig extension
     // is enabled (idempotent) so that `--worktree` scope is honoured by git.
     if linked_worktree {
+        profiling::scope!("git config write", "extensions.worktreeConfig");
         let ext_status = Command::new("git")
             .args(["config", "--local", "extensions.worktreeConfig", "true"])
             .current_dir(repo_root)
@@ -235,6 +240,7 @@ pub fn install_git_filters(repo_root: &Path, bin: &str, linked_worktree: bool) -
     ];
 
     for (key, value) in &pairs {
+        profiling::scope!("git config write", key.as_str());
         let status = Command::new("git")
             .args(["config", scope, key.as_str(), value.as_str()])
             .current_dir(repo_root)
@@ -278,6 +284,7 @@ pub fn read_agent_wrap(
     common_dir: &Path,
     fingerprint: &str,
 ) -> Result<Option<git_sshripped_ssh_agent_models::AgentWrappedKey>> {
+    profiling::scope!("read_agent_wrap");
     let file = agent_wrap_file(common_dir, fingerprint);
     if !file.exists() {
         return Ok(None);
@@ -299,6 +306,7 @@ pub fn write_agent_wrap(
     common_dir: &Path,
     wrapped: &git_sshripped_ssh_agent_models::AgentWrappedKey,
 ) -> Result<()> {
+    profiling::scope!("write_agent_wrap");
     let dir = agent_wrap_dir(common_dir);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create agent-wrap directory {}", dir.display()))?;
@@ -315,6 +323,7 @@ pub fn write_agent_wrap(
 ///
 /// Returns an error if the directory cannot be read.
 pub fn list_agent_wrap_files(common_dir: &Path) -> Result<Vec<PathBuf>> {
+    profiling::scope!("list_agent_wrap_files");
     let dir = agent_wrap_dir(common_dir);
     if !dir.exists() {
         return Ok(Vec::new());

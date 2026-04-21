@@ -36,10 +36,13 @@ anyhow = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["derive", "std"] }
 hex = { workspace = true, features = ["std"] }
+profiling = { workspace = true }
 rand = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
 serde_json = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = ["crypto-aes-siv"]
@@ -59,10 +62,23 @@ fail-on-warnings = [
   "git_sshripped_worktree_models/fail-on-warnings",
 ]
 crypto-aes-siv = ["git_sshripped_encryption/crypto-aes-siv"]
+# Enable tracing-backed `profiling` spans. When disabled (default), the
+# `profiling` macros compile to no-ops. When enabled, set
+# `GIT_SSHRIPPED_TRACE=1` at runtime to emit span timings to stderr.
+profile-trace = [
+  "profiling/profile-with-tracing",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+]
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "unlock"
+harness = false
 
 [package.metadata.cargo-machete]
 ignored = ["git_sshripped_encryption"]

@@ -78,6 +78,18 @@ toml = { version = "0.8.20", default-features = false }
 wait-timeout = { version = "0.2.1", default-features = false }
 zeroize = { version = "1.8.1", default-features = false }
 
+# Profiling / tracing (zero cost when no backend feature is enabled).
+profiling = { version = "1.0.17", default-features = false }
+tracing = { version = "0.1.44", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+  "fmt",
+  "env-filter",
+  "std",
+] }
+
+# Benchmarking (dev-dep only; see packages/cli/benches).
+criterion = { version = "0.8.2", default-features = false }
+
 # Crypto backends
 aes-siv = { version = "0.7.0", default-features = false }
 

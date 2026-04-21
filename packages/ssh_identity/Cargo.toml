@@ -16,6 +16,7 @@ age = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 dirs = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+profiling = { workspace = true }
 rpassword = { workspace = true }
 ssh-agent-client-rs = { workspace = true }
 ssh-key = { workspace = true }

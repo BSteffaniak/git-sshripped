@@ -77,6 +77,7 @@ pub fn fingerprint_for_public_key_line(openssh_line: &str) -> Option<String> {
 /// connection.  A missing `SSH_AUTH_SOCK` or connection refusal is treated
 /// as "no agent" and returns `Ok(vec![])`.
 pub fn list_agent_keys() -> Result<Vec<AgentKey>> {
+    profiling::scope!("list_agent_keys");
     let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") else {
         return Ok(Vec::new());
     };
@@ -252,6 +253,7 @@ fn derive_wrap_key(signature_bytes: &[u8], challenge: &[u8]) -> Result<[u8; 32]>
 /// Returns an error if the agent refuses to sign or a cryptographic
 /// operation fails.
 pub fn agent_wrap_repo_key(agent_key: &AgentKey, repo_key: &[u8]) -> Result<AgentWrappedKey> {
+    profiling::scope!("agent_wrap_repo_key");
     let challenge: [u8; 32] = rand::random();
 
     let signature = sign_with_agent(agent_key, &challenge)?;
@@ -287,6 +289,7 @@ pub fn agent_unwrap_repo_key(
     agent_key: &AgentKey,
     wrapped: &AgentWrappedKey,
 ) -> Result<Option<Vec<u8>>> {
+    profiling::scope!("agent_unwrap_repo_key");
     let challenge = BASE64
         .decode(&wrapped.challenge)
         .context("invalid base64 in agent-wrap challenge")?;

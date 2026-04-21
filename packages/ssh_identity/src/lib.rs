@@ -302,6 +302,7 @@ pub fn default_private_key_candidates() -> Vec<PathBuf> {
 /// Returns an error only on unexpected failures *after* a successful
 /// connection.
 pub fn agent_public_keys() -> Result<Vec<String>> {
+    profiling::scope!("agent_public_keys");
     let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") else {
         return Ok(Vec::new());
     };
@@ -332,6 +333,7 @@ pub fn agent_public_keys() -> Result<Vec<String>> {
 /// Returns an error if the agent cannot be queried or a public key file
 /// cannot be read.
 pub fn private_keys_matching_agent() -> Result<Vec<PathBuf>> {
+    profiling::scope!("private_keys_matching_agent");
     let agent_keys = agent_public_keys()?;
     if agent_keys.is_empty() {
         return Ok(Vec::new());
@@ -419,6 +421,7 @@ pub fn unwrap_repo_key_with_agent_helper(
     helper_path: &std::path::Path,
     timeout_ms: u64,
 ) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
+    profiling::scope!("unwrap_repo_key_with_agent_helper");
     for wrapped in wrapped_files {
         let mut child = Command::new(helper_path)
             .arg(wrapped)
@@ -479,6 +482,7 @@ pub fn unwrap_repo_key_with_agent_helper(
 /// This function is infallible in practice but returns `Result` for
 /// consistency with the rest of the API.
 pub fn detect_identity() -> Result<IdentityDescriptor> {
+    profiling::scope!("detect_identity");
     if std::env::var_os("SSH_AUTH_SOCK").is_some() {
         return Ok(IdentityDescriptor {
             source: IdentitySource::SshAgent,
@@ -512,6 +516,7 @@ pub fn unwrap_repo_key_from_wrapped_files<S: ::std::hash::BuildHasher>(
     identity_files: &[PathBuf],
     interactive_identities: &HashSet<PathBuf, S>,
 ) -> Result<Option<(Vec<u8>, IdentityDescriptor)>> {
+    profiling::scope!("unwrap_repo_key_from_wrapped_files");
     let mut identities: Vec<(SshIdentity, PathBuf)> = Vec::new();
     let mut skipped_encrypted: Vec<(age::ssh::EncryptedKey, PathBuf)> = Vec::new();
 

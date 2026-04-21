@@ -2,6 +2,8 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
+mod trace;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -338,6 +340,7 @@ struct MigrateOptions {
 /// Returns an error if the subcommand fails for any reason (invalid input,
 /// I/O failure, Git operation failure, etc.).
 pub fn run() -> Result<()> {
+    trace::init_trace();
     let cli = Cli::parse();
     dispatch_command(cli.command)
 }
@@ -478,11 +481,13 @@ fn dispatch_github_command(command: Command) -> Result<()> {
 }
 
 fn current_repo_root() -> Result<PathBuf> {
+    profiling::scope!("current_repo_root");
     let cwd = std::env::current_dir().context("failed to read current dir")?;
     resolve_repo_root_for_command(&cwd)
 }
 
 fn current_common_dir() -> Result<PathBuf> {
+    profiling::scope!("current_common_dir");
     let cwd = std::env::current_dir().context("failed to read current dir")?;
     resolve_common_dir_for_command(&cwd)
 }
@@ -495,6 +500,7 @@ fn current_common_dir() -> Result<PathBuf> {
 ///   3. `std::env::current_exe()` (the running binary)
 ///   4. Bare `"git-sshripped"` fallback
 fn current_bin_path(repo_root: Option<&std::path::Path>) -> String {
+    profiling::scope!("current_bin_path");
     // 1. Environment variable override.
     if let Ok(val) = std::env::var("GIT_SSHRIPPED_BIN")
         && !val.is_empty()
@@ -518,6 +524,7 @@ fn current_bin_path(repo_root: Option<&std::path::Path>) -> String {
 }
 
 fn current_is_linked_worktree(repo_root: &std::path::Path) -> bool {
+    profiling::scope!("current_is_linked_worktree");
     is_linked_worktree(repo_root).unwrap_or(false)
 }
 
@@ -1180,6 +1187,7 @@ fn cmd_init(
 ///
 /// Returns an error on I/O failures after a successful agent connection.
 fn try_agent_wrap_unlock(common_dir: &std::path::Path) -> Result<Option<(Vec<u8>, String)>> {
+    profiling::scope!("try_agent_wrap_unlock");
     let agent_keys = match list_agent_keys() {
         Ok(keys) if !keys.is_empty() => keys,
         _ => return Ok(None),
@@ -1220,6 +1228,7 @@ fn generate_missing_agent_wraps(
     common_dir: &std::path::Path,
     repo_key: &[u8],
 ) {
+    profiling::scope!("generate_missing_agent_wraps");
     let agent_keys = match list_agent_keys() {
         Ok(keys) if !keys.is_empty() => keys,
         _ => return,
@@ -1284,6 +1293,7 @@ fn unwrap_repo_key_from_identities(
     prefer_agent: bool,
     no_agent: bool,
 ) -> Result<(Vec<u8>, String)> {
+    profiling::scope!("unwrap_repo_key_from_identities");
     let explicit_identities: Vec<PathBuf> = identities.into_iter().map(PathBuf::from).collect();
     let interactive_set: std::collections::HashSet<PathBuf> =
         explicit_identities.iter().cloned().collect();
@@ -1409,6 +1419,7 @@ fn cmd_unlock(
     prefer_agent: bool,
     no_agent: bool,
 ) -> Result<()> {
+    profiling::scope!("cmd_unlock");
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let mut manifest = read_manifest(&repo_root)?;
@@ -1496,6 +1507,7 @@ const GIT_CHECKOUT_BATCH_SIZE: usize = 100;
 /// touched; plaintext files (e.g. ones the user has already edited) are left
 /// alone.
 fn checkout_encrypted_worktree_files(repo_root: &std::path::Path) -> usize {
+    profiling::scope!("checkout_encrypted_worktree_files");
     let Ok(protected) = protected_tracked_files(repo_root) else {
         return 0;
     };
@@ -1532,6 +1544,7 @@ fn checkout_encrypted_worktree_files(repo_root: &std::path::Path) -> usize {
 
     let mut decrypted = 0usize;
     for batch in encrypted.chunks(GIT_CHECKOUT_BATCH_SIZE) {
+        profiling::scope!("git checkout batch");
         let mut cmd = std::process::Command::new("git");
         cmd.current_dir(repo_root)
             .args(["-c", "core.hooksPath=", "checkout", "--"]);
@@ -1555,6 +1568,7 @@ fn checkout_encrypted_worktree_files(repo_root: &std::path::Path) -> usize {
 }
 
 fn cmd_lock(force: bool, no_scrub: bool) -> Result<()> {
+    profiling::scope!("cmd_lock");
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let previous_session = read_unlock_session(&common_dir)?;
@@ -1615,6 +1629,7 @@ fn cmd_lock(force: bool, no_scrub: bool) -> Result<()> {
 }
 
 fn cmd_status(json: bool) -> Result<()> {
+    profiling::scope!("cmd_status");
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let manifest = read_manifest(&repo_root)?;
@@ -3682,6 +3697,7 @@ fn scrub_protected_paths(repo_root: &std::path::Path, protected: &[String]) -> R
 }
 
 fn read_gitattributes_patterns(repo_root: &std::path::Path) -> Vec<String> {
+    profiling::scope!("read_gitattributes_patterns");
     let path = repo_root.join(".gitattributes");
     let Ok(text) = fs::read_to_string(&path) else {
         return Vec::new();
@@ -3706,6 +3722,7 @@ fn read_gitattributes_patterns(repo_root: &std::path::Path) -> Vec<String> {
 }
 
 fn protected_tracked_files(repo_root: &std::path::Path) -> Result<Vec<String>> {
+    profiling::scope!("protected_tracked_files");
     // Fast path: if .gitattributes has no filter=git-sshripped patterns, there are no
     // protected files.  This avoids piping every tracked file (potentially thousands)
     // through git check-attr.
@@ -3737,12 +3754,15 @@ fn protected_tracked_files(repo_root: &std::path::Path) -> Result<Vec<String>> {
         })
         .collect();
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(repo_root).args(["ls-files", "-z", "--"]);
-    for pathspec in &pathspecs {
-        cmd.arg(pathspec);
-    }
-    let ls_output = cmd.output().context("failed to run git ls-files")?;
+    let ls_output = {
+        profiling::scope!("git ls-files");
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(repo_root).args(["ls-files", "-z", "--"]);
+        for pathspec in &pathspecs {
+            cmd.arg(pathspec);
+        }
+        cmd.output().context("failed to run git ls-files")?
+    };
     if !ls_output.status.success() {
         anyhow::bail!("git ls-files failed");
     }
@@ -3760,26 +3780,29 @@ fn protected_tracked_files(repo_root: &std::path::Path) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let mut child = std::process::Command::new("git")
-        .current_dir(repo_root)
-        .args(["check-attr", "-z", "--stdin", "filter"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .context("failed to spawn git check-attr")?;
+    let output = {
+        profiling::scope!("git check-attr");
+        let mut child = std::process::Command::new("git")
+            .current_dir(repo_root)
+            .args(["check-attr", "-z", "--stdin", "filter"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn git check-attr")?;
 
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("failed to open check-attr stdin")?;
-        for path in &files {
-            std::io::Write::write_all(stdin, path.as_bytes())?;
-            std::io::Write::write_all(stdin, b"\0")?;
+        {
+            let stdin = child
+                .stdin
+                .as_mut()
+                .context("failed to open check-attr stdin")?;
+            for path in &files {
+                std::io::Write::write_all(stdin, path.as_bytes())?;
+                std::io::Write::write_all(stdin, b"\0")?;
+            }
         }
-    }
 
-    let output = child.wait_with_output().context("git check-attr failed")?;
+        child.wait_with_output().context("git check-attr failed")?
+    };
     if !output.status.success() {
         anyhow::bail!("git check-attr exited non-zero");
     }
@@ -3860,6 +3883,7 @@ fn cmd_verify(strict: bool, json: bool) -> Result<()> {
 }
 
 fn cmd_rewrap() -> Result<()> {
+    profiling::scope!("cmd_rewrap");
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let Some(key) = repo_key_from_session()? else {
@@ -4015,6 +4039,7 @@ fn repo_key_from_session_in(
     common_dir: &std::path::Path,
     manifest: Option<&RepositoryManifest>,
 ) -> Result<Option<Vec<u8>>> {
+    profiling::scope!("repo_key_from_session_in");
     let maybe_session = read_unlock_session(common_dir)?;
     let Some(session) = maybe_session else {
         return Ok(None);
@@ -4041,6 +4066,7 @@ fn repo_key_from_session_in(
 }
 
 fn repo_key_from_session() -> Result<Option<Vec<u8>>> {
+    profiling::scope!("repo_key_from_session");
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
     let common_dir = current_common_dir()?;
@@ -4052,6 +4078,7 @@ fn repo_key_from_session() -> Result<Option<Vec<u8>>> {
 /// This is needed because filter entries may live in the worktree-specific
 /// config layer when `extensions.worktreeConfig` is enabled.
 fn git_effective_config(repo_root: &std::path::Path, key: &str) -> Result<Option<String>> {
+    profiling::scope!("git_effective_config");
     let output = std::process::Command::new("git")
         .current_dir(repo_root)
         .args(["config", "--get", key])
@@ -4312,6 +4339,7 @@ fn doctor_output_results(
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {
+    profiling::scope!("cmd_doctor");
     let mut failures = Vec::new();
 
     let repo_root = current_repo_root()?;
@@ -4391,6 +4419,7 @@ fn write_stdout_all(bytes: &[u8]) -> Result<()> {
 }
 
 fn cmd_clean(path: &str) -> Result<()> {
+    profiling::scope!("cmd_clean");
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
     let key = repo_key_from_session()?;
@@ -4400,6 +4429,7 @@ fn cmd_clean(path: &str) -> Result<()> {
 }
 
 fn cmd_smudge(path: &str) -> Result<()> {
+    profiling::scope!("cmd_smudge");
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
     let output = smudge(key.as_deref(), path, &input)?;
@@ -4407,6 +4437,7 @@ fn cmd_smudge(path: &str) -> Result<()> {
 }
 
 fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
+    profiling::scope!("cmd_diff");
     let key = repo_key_from_session()?;
     let input = if let Some(file_path) = file {
         fs::read(file_path)
@@ -4419,6 +4450,7 @@ fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
 }
 
 fn cmd_filter_process() -> Result<()> {
+    profiling::scope!("cmd_filter_process");
     let cwd = std::env::current_dir().context("failed to read current dir")?;
     let repo_root = resolve_repo_root_for_filter(&cwd);
     let common_dir = resolve_common_dir_for_filter(&cwd);
@@ -4537,6 +4569,7 @@ fn resolve_common_dir_for_filter(cwd: &std::path::Path) -> PathBuf {
 }
 
 fn resolve_repo_root_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
+    profiling::scope!("resolve_repo_root_for_command");
     if std::env::var_os("GIT_DIR").is_some() {
         return Ok(resolve_repo_root_for_filter(cwd));
     }
@@ -4544,6 +4577,7 @@ fn resolve_repo_root_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
 }
 
 fn resolve_common_dir_for_command(cwd: &std::path::Path) -> Result<PathBuf> {
+    profiling::scope!("resolve_common_dir_for_command");
     if std::env::var_os("GIT_DIR").is_some() {
         return Ok(resolve_common_dir_for_filter(cwd));
     }
@@ -4814,6 +4848,26 @@ fn local_public_key_contents() -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Benchmark hooks for the `packages/cli/benches` harness.
+///
+/// **Not** part of the stable public API. The surface here is intentionally
+/// minimal and may change freely between releases.
+#[doc(hidden)]
+pub mod __bench {
+    use anyhow::Result;
+
+    /// Invoke [`cmd_unlock`](super::cmd_unlock) with the default argument
+    /// shape used by `git-sshripped unlock --soft` (no key hex, no
+    /// identities, no GitHub user, prefer-agent false, no-agent false).
+    ///
+    /// # Errors
+    ///
+    /// Forwards any error produced by the underlying unlock flow.
+    pub fn cmd_unlock_default() -> Result<()> {
+        super::cmd_unlock(None, Vec::new(), None, false, false)
+    }
 }
 
 #[cfg(test)]

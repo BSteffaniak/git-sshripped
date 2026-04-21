@@ -602,6 +602,7 @@ pub fn wrapped_store_dir(repo_root: &Path) -> PathBuf {
 /// Returns an error if the recipient directory cannot be read or a recipient
 /// file cannot be parsed.
 pub fn list_recipients(repo_root: &Path) -> Result<Vec<RecipientKey>> {
+    profiling::scope!("list_recipients");
     let dir = recipient_store_dir(repo_root);
     if !dir.exists() {
         return Ok(Vec::new());
@@ -834,6 +835,7 @@ pub fn wrap_repo_key_for_recipient(
     recipient: &RecipientKey,
     repo_key: &[u8],
 ) -> Result<PathBuf> {
+    profiling::scope!("wrap_repo_key_for_recipient");
     let ssh_recipient = SshRecipient::from_str(&recipient.public_key_line).map_err(|err| {
         anyhow::anyhow!(
             "invalid ssh public key for {}: {:?}",
@@ -872,6 +874,7 @@ pub fn wrap_repo_key_for_recipient(
 /// Returns an error if no recipients are configured, or if wrapping fails
 /// for any recipient.
 pub fn wrap_repo_key_for_all_recipients(repo_root: &Path, repo_key: &[u8]) -> Result<Vec<PathBuf>> {
+    profiling::scope!("wrap_repo_key_for_all_recipients");
     let recipients = list_recipients(repo_root)?;
     if recipients.is_empty() {
         bail!("no recipients configured; add at least one recipient first");
