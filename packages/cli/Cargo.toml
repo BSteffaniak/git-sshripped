@@ -72,7 +72,7 @@ profile-trace = [
 ]
 
 [dev-dependencies]
-criterion = { workspace = true, features = ["html_reports"] }
+criterion = { workspace = true, features = ["html_reports", "plotters"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 
