@@ -82,20 +82,50 @@ pub fn is_linked_worktree(cwd: &Path) -> Result<bool> {
     Ok(is_linked_worktree_inner(cwd, &git_dir_raw, &common_dir_raw))
 }
 
-/// Like [`is_linked_worktree`] but accepts an already-resolved common dir to
-/// avoid re-running `git rev-parse --git-common-dir`.
+/// Resolved worktree identity: the absolute per-worktree Git directory and
+/// whether this is a linked (non-main) worktree.
+#[derive(Debug, Clone)]
+pub struct WorktreeIdentity {
+    /// Absolute per-worktree Git directory. For the main worktree this is
+    /// equivalent to `$GIT_COMMON_DIR`; for linked worktrees it is
+    /// `$GIT_COMMON_DIR/worktrees/<id>`.
+    ///
+    /// Path components are joined against `cwd` when `git rev-parse`
+    /// returns a relative path, but the result is intentionally **not**
+    /// canonicalised so it matches what `$GIT_DIR` would contain at
+    /// process start.
+    pub git_dir: PathBuf,
+    /// `true` when `git_dir` differs from the common dir after symlink
+    /// resolution.
+    pub linked: bool,
+}
+
+/// Resolve the per-worktree Git directory and linked-worktree flag.
 ///
-/// The passed `common_dir` may be relative (as returned by
-/// [`git_common_dir`]); it is resolved against `cwd` the same way the
-/// internal helper does.
+/// Uses a single `git rev-parse --git-dir` subprocess call, reusing an
+/// already-resolved common dir to avoid a second subprocess spawn.
+///
+/// The returned `git_dir` is absolute (joined against `cwd` if `git` gave
+/// us a relative path) but intentionally un-canonicalised so it is stable
+/// for use as a cache/marker key.  The `linked` flag *does* use canonical
+/// paths so symlinked git dirs compare correctly.
 ///
 /// # Errors
 ///
 /// Returns an error if `git rev-parse --git-dir` fails.
-pub fn is_linked_worktree_with_common_dir(cwd: &Path, common_dir: &Path) -> Result<bool> {
-    profiling::scope!("is_linked_worktree_with_common_dir");
+pub fn resolve_worktree_identity(cwd: &Path, common_dir: &Path) -> Result<WorktreeIdentity> {
+    profiling::scope!("resolve_worktree_identity");
     let git_dir_raw = git_dir(cwd)?;
-    Ok(is_linked_worktree_inner(cwd, &git_dir_raw, common_dir))
+    let abs_git = if git_dir_raw.is_absolute() {
+        git_dir_raw
+    } else {
+        cwd.join(git_dir_raw)
+    };
+    let linked = is_linked_worktree_inner(cwd, &abs_git, common_dir);
+    Ok(WorktreeIdentity {
+        git_dir: abs_git,
+        linked,
+    })
 }
 
 fn is_linked_worktree_inner(cwd: &Path, git_dir_raw: &Path, common_dir_raw: &Path) -> bool {

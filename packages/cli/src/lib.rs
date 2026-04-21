@@ -41,8 +41,8 @@ use git_sshripped_ssh_identity::{
 };
 use git_sshripped_ssh_identity_models::IdentityDescriptor;
 use git_sshripped_worktree::{
-    clear_unlock_session, git_common_dir, git_toplevel, is_linked_worktree_with_common_dir,
-    read_unlock_session, write_unlock_session,
+    WorktreeIdentity, clear_unlock_session, git_common_dir, git_toplevel, read_unlock_session,
+    resolve_worktree_identity, write_unlock_session,
 };
 use git_sshripped_worktree_models::UnlockSession;
 use rand::RngCore;
@@ -493,6 +493,14 @@ fn current_common_dir() -> Result<PathBuf> {
     resolve_common_dir_for_command(&cwd)
 }
 
+/// Resolve both the per-worktree Git directory and the linked-worktree flag
+/// in a single subprocess call, reusing an already-resolved common dir.
+fn current_worktree_identity(common_dir: &std::path::Path) -> Result<WorktreeIdentity> {
+    profiling::scope!("current_worktree_identity");
+    let cwd = std::env::current_dir().context("failed to read current dir")?;
+    resolve_worktree_identity(&cwd, common_dir)
+}
+
 /// Resolve the binary path to embed in git filter config.
 ///
 /// Precedence (first non-empty value wins):
@@ -543,14 +551,6 @@ fn bin_path_from_current_exe() -> String {
         .ok()
         .and_then(|p| p.to_str().map(ToString::to_string))
         .unwrap_or_else(|| "git-sshripped".to_string())
-}
-
-fn current_is_linked_worktree_with_common(
-    repo_root: &std::path::Path,
-    common_dir: &std::path::Path,
-) -> bool {
-    profiling::scope!("current_is_linked_worktree_with_common");
-    is_linked_worktree_with_common_dir(repo_root, common_dir).unwrap_or(false)
 }
 
 fn wrapped_key_files(repo_root: &std::path::Path) -> Result<Vec<PathBuf>> {
@@ -1117,7 +1117,8 @@ fn cmd_init(
 
     write_manifest(&repo_root, &manifest)?;
     install_gitattributes(&repo_root, patterns)?;
-    install_filters_and_update_marker(&repo_root, &common_dir)?;
+    let identity = current_worktree_identity(&common_dir)?;
+    install_filters_and_update_marker(&repo_root, &identity)?;
 
     let mut added_recipients = Vec::new();
 
@@ -1452,7 +1453,8 @@ fn cmd_unlock(
     if key_hex.is_none()
         && let Ok(Some(_)) = repo_key_from_session_in(&common_dir, Some(&manifest))
     {
-        return fast_path_already_unlocked(&repo_root, &common_dir);
+        let identity = current_worktree_identity(&common_dir)?;
+        return fast_path_already_unlocked(&repo_root, &identity);
     }
 
     let (key, key_source) = if let Some(hex_value) = key_hex {
@@ -1484,7 +1486,8 @@ fn cmd_unlock(
     }
 
     write_unlock_session(&common_dir, &key, &key_source, Some(key_id))?;
-    install_filters_and_update_marker(&repo_root, &common_dir)?;
+    let identity = current_worktree_identity(&common_dir)?;
+    install_filters_and_update_marker(&repo_root, &identity)?;
 
     // Opportunistically generate agent-wrap files for recipients whose keys
     // are in the SSH agent, so future unlocks can use the fast agent path.
@@ -1514,15 +1517,17 @@ fn cmd_unlock(
 /// In that case we short-circuit without shelling out to `git config` or
 /// `git ls-files`, saving ~100ms on the `unlock --soft` hot path. On marker
 /// miss we fall through to the full (but still idempotent) install + scan.
+///
+/// The marker is scoped to the per-worktree `$GIT_DIR` so bouncing between
+/// linked worktrees does not invalidate it.
 fn fast_path_already_unlocked(
     repo_root: &std::path::Path,
-    common_dir: &std::path::Path,
+    identity: &WorktreeIdentity,
 ) -> Result<()> {
     profiling::scope!("fast_path_already_unlocked");
-    let linked = current_is_linked_worktree_with_common(repo_root, common_dir);
     let bin_fast = current_bin_path_fast();
 
-    if filter_marker_matches(common_dir, repo_root, &bin_fast, linked) {
+    if filter_marker_matches(identity, repo_root, &bin_fast) {
         println!("repository is already unlocked");
         return Ok(());
     }
@@ -1531,8 +1536,8 @@ fn fast_path_already_unlocked(
     // that worktrees without filters configured (fresh clones, new linked
     // worktrees, upgraded binaries) still get correctly set up.
     let bin = current_bin_path(Some(repo_root));
-    install_git_filters(repo_root, &bin, linked)?;
-    persist_filter_marker(common_dir, repo_root, &bin, linked);
+    install_git_filters(repo_root, &bin, identity.linked)?;
+    persist_filter_marker(identity, repo_root, &bin);
     let decrypted_count = checkout_encrypted_worktree_files(repo_root);
     if decrypted_count > 0 {
         println!("decrypted {decrypted_count} protected files in working tree");
@@ -1545,29 +1550,27 @@ fn fast_path_already_unlocked(
 /// next unlock can short-circuit.
 fn install_filters_and_update_marker(
     repo_root: &std::path::Path,
-    common_dir: &std::path::Path,
+    identity: &WorktreeIdentity,
 ) -> Result<()> {
     profiling::scope!("install_filters_and_update_marker");
-    let linked = current_is_linked_worktree_with_common(repo_root, common_dir);
     let bin = current_bin_path(Some(repo_root));
-    install_git_filters(repo_root, &bin, linked)?;
-    persist_filter_marker(common_dir, repo_root, &bin, linked);
+    install_git_filters(repo_root, &bin, identity.linked)?;
+    persist_filter_marker(identity, repo_root, &bin);
     Ok(())
 }
 
 fn filter_marker_matches(
-    common_dir: &std::path::Path,
+    identity: &WorktreeIdentity,
     repo_root: &std::path::Path,
     bin_path: &str,
-    linked_worktree: bool,
 ) -> bool {
     profiling::scope!("filter_marker_matches");
-    let Some(marker) = read_filter_marker(common_dir) else {
+    let Some(marker) = read_filter_marker(&identity.git_dir) else {
         return false;
     };
     if marker.version != FilterInstallMarker::SCHEMA_VERSION
         || marker.bin_path != bin_path
-        || marker.linked_worktree != linked_worktree
+        || marker.linked_worktree != identity.linked
         || std::path::Path::new(&marker.repo_root) != repo_root
     {
         return false;
@@ -1577,7 +1580,7 @@ fn filter_marker_matches(
     // needs us to reinstall. One cheap `git config --get` closes that gap
     // and still leaves the fast path ~4x faster than the old unconditional
     // reinstall.
-    filter_config_live(repo_root, linked_worktree)
+    filter_config_live(repo_root, identity.linked)
 }
 
 fn filter_config_live(repo_root: &std::path::Path, linked_worktree: bool) -> bool {
@@ -1597,19 +1600,14 @@ fn filter_config_live(repo_root: &std::path::Path, linked_worktree: bool) -> boo
     }
 }
 
-fn persist_filter_marker(
-    common_dir: &std::path::Path,
-    repo_root: &std::path::Path,
-    bin_path: &str,
-    linked_worktree: bool,
-) {
+fn persist_filter_marker(identity: &WorktreeIdentity, repo_root: &std::path::Path, bin_path: &str) {
     let marker = FilterInstallMarker {
         version: FilterInstallMarker::SCHEMA_VERSION,
         bin_path: bin_path.to_string(),
-        linked_worktree,
+        linked_worktree: identity.linked,
         repo_root: repo_root.display().to_string(),
     };
-    write_filter_marker(common_dir, &marker);
+    write_filter_marker(&identity.git_dir, &marker);
 }
 
 /// Batch size for `git checkout` calls, matching git-crypt's limit to avoid
@@ -3215,7 +3213,8 @@ fn cmd_install() -> Result<()> {
     let repo_root = current_repo_root()?;
     let common_dir = current_common_dir()?;
     let _manifest = read_manifest(&repo_root)?;
-    install_filters_and_update_marker(&repo_root, &common_dir)?;
+    let identity = current_worktree_identity(&common_dir)?;
+    install_filters_and_update_marker(&repo_root, &identity)?;
     println!("install: refreshed git filter configuration");
     Ok(())
 }
@@ -3594,7 +3593,8 @@ fn cmd_migrate_from_git_crypt(opts: &MigrateOptions) -> Result<()> {
             .with_context(|| format!("failed to rewrite {}", path.display()))?;
         write_manifest(&repo_root, &manifest_after)?;
         install_gitattributes(&repo_root, &plan.patterns)?;
-        install_filters_and_update_marker(&repo_root, &common_dir)?;
+        let identity = current_worktree_identity(&common_dir)?;
+        install_filters_and_update_marker(&repo_root, &identity)?;
     }
 
     let reencrypted_files = if opts.reencrypt {

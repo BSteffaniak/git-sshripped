@@ -398,17 +398,24 @@ pub fn parse_agent_wrap(text: &str) -> Result<git_sshripped_ssh_agent_models::Ag
 // ---------------------------------------------------------------------------
 // Filter install marker
 //
-// The marker lives alongside the unlock session in the git common directory
-// so it is:
+// The marker lives inside the per-worktree Git directory ($GIT_DIR) so that
+// each linked worktree independently tracks whether filter configuration has
+// been installed for the current binary.  For the main worktree $GIT_DIR is
+// equivalent to $GIT_COMMON_DIR, so the file lands in the same physical
+// location as before; for linked worktrees it lands under
+// $GIT_COMMON_DIR/worktrees/<id>/git-sshripped/session/.
+//
+// The marker is:
 //   - local to the machine (never committed)
-//   - shared across linked worktrees for the main-worktree case
-//   - discarded whenever the common dir is nuked
+//   - per-worktree, so switching between worktrees does not invalidate the
+//     fast path
+//   - discarded whenever the git dir is nuked
 // ---------------------------------------------------------------------------
 
-/// Path to the filter-install marker for a given common dir.
+/// Path to the filter-install marker for a given per-worktree Git dir.
 #[must_use]
-pub fn filter_marker_file(common_dir: &Path) -> PathBuf {
-    common_dir
+pub fn filter_marker_file(git_dir: &Path) -> PathBuf {
+    git_dir
         .join("git-sshripped")
         .join("session")
         .join("filters-installed.json")
@@ -420,9 +427,9 @@ pub fn filter_marker_file(common_dir: &Path) -> PathBuf {
 /// is not fatal -- callers treat it the same as a missing marker and fall
 /// through to a full reinstall.
 #[must_use]
-pub fn read_filter_marker(common_dir: &Path) -> Option<FilterInstallMarker> {
+pub fn read_filter_marker(git_dir: &Path) -> Option<FilterInstallMarker> {
     profiling::scope!("read_filter_marker");
-    let path = filter_marker_file(common_dir);
+    let path = filter_marker_file(git_dir);
     let text = fs::read_to_string(&path).ok()?;
     serde_json::from_str::<FilterInstallMarker>(&text).ok()
 }
@@ -432,9 +439,9 @@ pub fn read_filter_marker(common_dir: &Path) -> Option<FilterInstallMarker> {
 /// Any I/O or serialization failure is non-fatal -- the marker is a cache
 /// hint, not a source of truth. Callers therefore get `()` back and do not
 /// propagate errors from this function.
-pub fn write_filter_marker(common_dir: &Path, marker: &FilterInstallMarker) {
+pub fn write_filter_marker(git_dir: &Path, marker: &FilterInstallMarker) {
     profiling::scope!("write_filter_marker");
-    let path = filter_marker_file(common_dir);
+    let path = filter_marker_file(git_dir);
     let Some(parent) = path.parent() else {
         return;
     };
@@ -451,8 +458,8 @@ pub fn write_filter_marker(common_dir: &Path, marker: &FilterInstallMarker) {
 /// Callers use this when they know filter configuration has been touched
 /// outside of [`install_git_filters`] (e.g. the `install` subcommand or any
 /// direct `git config --unset` performed elsewhere).
-pub fn clear_filter_marker(common_dir: &Path) {
+pub fn clear_filter_marker(git_dir: &Path) {
     profiling::scope!("clear_filter_marker");
-    let path = filter_marker_file(common_dir);
+    let path = filter_marker_file(git_dir);
     let _ = fs::remove_file(path);
 }
