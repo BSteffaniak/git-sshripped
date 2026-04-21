@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "git_sshripped_cli_models",
  "git_sshripped_encryption",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_cli"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_cli_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "git_sshripped_encryption_models",
  "serde",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_encryption"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "aes-siv",
  "anyhow",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_encryption_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_filter"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "git_sshripped_encryption",
@@ -1001,14 +1001,14 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_filter_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "git_sshripped_recipient"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1023,14 +1023,14 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_recipient_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "git_sshripped_repository"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "git_sshripped_repository_models",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_repository_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "git_sshripped_encryption_models",
  "serde",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_ssh_agent"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1066,14 +1066,14 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_ssh_agent_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "git_sshripped_ssh_identity"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1090,14 +1090,14 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_ssh_identity_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "git_sshripped_worktree"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1108,21 +1108,21 @@ dependencies = [
 
 [[package]]
 name = "git_sshripped_worktree_models"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "git_sshript"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "git_sshripped_cli",
 ]
 
 [[package]]
 name = "git_sshrypt"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "git_sshripped_cli",
 ]
