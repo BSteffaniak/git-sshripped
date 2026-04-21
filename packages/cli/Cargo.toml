@@ -81,4 +81,4 @@ name = "unlock"
 harness = false
 
 [package.metadata.cargo-machete]
-ignored = ["git_sshripped_encryption"]
+ignored = ["git_sshripped_encryption", "tracing"]

@@ -12,7 +12,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 anyhow = { workspace = true, features = ["std"] }
 git_sshripped_encryption = { workspace = true }
-git_sshripped_encryption_models = { workspace = true }
 
 [[bin]]
 name = "encryption_decrypt"
