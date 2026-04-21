@@ -79,15 +79,34 @@ pub fn is_linked_worktree(cwd: &Path) -> Result<bool> {
     profiling::scope!("is_linked_worktree");
     let git_dir_raw = git_dir(cwd)?;
     let common_dir_raw = git_common_dir(cwd)?;
+    Ok(is_linked_worktree_inner(cwd, &git_dir_raw, &common_dir_raw))
+}
 
+/// Like [`is_linked_worktree`] but accepts an already-resolved common dir to
+/// avoid re-running `git rev-parse --git-common-dir`.
+///
+/// The passed `common_dir` may be relative (as returned by
+/// [`git_common_dir`]); it is resolved against `cwd` the same way the
+/// internal helper does.
+///
+/// # Errors
+///
+/// Returns an error if `git rev-parse --git-dir` fails.
+pub fn is_linked_worktree_with_common_dir(cwd: &Path, common_dir: &Path) -> Result<bool> {
+    profiling::scope!("is_linked_worktree_with_common_dir");
+    let git_dir_raw = git_dir(cwd)?;
+    Ok(is_linked_worktree_inner(cwd, &git_dir_raw, common_dir))
+}
+
+fn is_linked_worktree_inner(cwd: &Path, git_dir_raw: &Path, common_dir_raw: &Path) -> bool {
     // Both flags may return relative paths – resolve them to absolute.
     let abs_git = if git_dir_raw.is_absolute() {
-        git_dir_raw
+        git_dir_raw.to_path_buf()
     } else {
         cwd.join(git_dir_raw)
     };
     let abs_common = if common_dir_raw.is_absolute() {
-        common_dir_raw
+        common_dir_raw.to_path_buf()
     } else {
         cwd.join(common_dir_raw)
     };
@@ -96,7 +115,7 @@ pub fn is_linked_worktree(cwd: &Path) -> Result<bool> {
     let canon_git = fs::canonicalize(&abs_git).unwrap_or(abs_git);
     let canon_common = fs::canonicalize(&abs_common).unwrap_or(abs_common);
 
-    Ok(canon_git != canon_common)
+    canon_git != canon_common
 }
 
 #[must_use]

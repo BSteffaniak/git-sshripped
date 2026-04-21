@@ -15,6 +15,7 @@ git_sshripped_repository_models = { workspace = true }
 git_sshripped_ssh_agent_models = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 profiling = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 toml = { workspace = true, features = ["display", "parse"] }
 
 [features]

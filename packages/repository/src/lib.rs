@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use git_sshripped_repository_models::{
-    GithubSourceRegistry, RepositoryLocalConfig, RepositoryManifest,
+    FilterInstallMarker, GithubSourceRegistry, RepositoryLocalConfig, RepositoryManifest,
 };
 
 #[must_use]
@@ -189,6 +189,11 @@ fn shell_quote(s: &str) -> String {
 /// are written to the shared local config (`git config --local`) which acts
 /// as the default fallback for all worktrees.
 ///
+/// This function is **idempotent**: it runs `git config --get` for each key
+/// first and only issues a write when the recorded value differs from the
+/// desired one. On repositories where the filter config is already correct
+/// (the common case when a user re-runs `unlock`), no writes happen at all.
+///
 /// # Errors
 ///
 /// Returns an error if any `git config` command fails.
@@ -197,16 +202,7 @@ pub fn install_git_filters(repo_root: &Path, bin: &str, linked_worktree: bool) -
     // When writing to a linked worktree, ensure the worktreeConfig extension
     // is enabled (idempotent) so that `--worktree` scope is honoured by git.
     if linked_worktree {
-        profiling::scope!("git config write", "extensions.worktreeConfig");
-        let ext_status = Command::new("git")
-            .args(["config", "--local", "extensions.worktreeConfig", "true"])
-            .current_dir(repo_root)
-            .status()
-            .context("failed to enable extensions.worktreeConfig")?;
-
-        if !ext_status.success() {
-            anyhow::bail!("git config failed for key 'extensions.worktreeConfig'");
-        }
+        ensure_worktree_config_enabled(repo_root)?;
     }
 
     let scope = if linked_worktree {
@@ -240,18 +236,64 @@ pub fn install_git_filters(repo_root: &Path, bin: &str, linked_worktree: bool) -
     ];
 
     for (key, value) in &pairs {
-        profiling::scope!("git config write", key.as_str());
-        let status = Command::new("git")
-            .args(["config", scope, key.as_str(), value.as_str()])
-            .current_dir(repo_root)
-            .status()
-            .with_context(|| format!("failed to set git config {key}"))?;
-
-        if !status.success() {
-            anyhow::bail!("git config failed for key '{key}'");
-        }
+        ensure_git_config_value(repo_root, scope, key, value)?;
     }
     Ok(())
+}
+
+fn ensure_worktree_config_enabled(repo_root: &Path) -> Result<()> {
+    const KEY: &str = "extensions.worktreeConfig";
+    if git_config_read(repo_root, Some("--local"), KEY)?.as_deref() == Some("true") {
+        return Ok(());
+    }
+    profiling::scope!("git config write", KEY);
+    let ext_status = Command::new("git")
+        .args(["config", "--local", KEY, "true"])
+        .current_dir(repo_root)
+        .status()
+        .context("failed to enable extensions.worktreeConfig")?;
+    if !ext_status.success() {
+        anyhow::bail!("git config failed for key '{KEY}'");
+    }
+    Ok(())
+}
+
+fn ensure_git_config_value(repo_root: &Path, scope: &str, key: &str, value: &str) -> Result<()> {
+    if git_config_read(repo_root, Some(scope), key)?.as_deref() == Some(value) {
+        return Ok(());
+    }
+    profiling::scope!("git config write", key);
+    let status = Command::new("git")
+        .args(["config", scope, key, value])
+        .current_dir(repo_root)
+        .status()
+        .with_context(|| format!("failed to set git config {key}"))?;
+    if !status.success() {
+        anyhow::bail!("git config failed for key '{key}'");
+    }
+    Ok(())
+}
+
+fn git_config_read(repo_root: &Path, scope: Option<&str>, key: &str) -> Result<Option<String>> {
+    profiling::scope!("git config read", key);
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_root).arg("config");
+    if let Some(s) = scope {
+        cmd.arg(s);
+    }
+    cmd.args(["--get", key]);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to run git config --get {key}"))?;
+    if !output.status.success() {
+        // Exit code 1 means the key is unset; that's not an error.
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)
+        .with_context(|| format!("git config value for {key} is not utf8"))?
+        .trim_end_matches('\n')
+        .to_string();
+    Ok(Some(text))
 }
 
 // ---------------------------------------------------------------------------
@@ -351,4 +393,66 @@ pub fn list_agent_wrap_files(common_dir: &Path) -> Result<Vec<PathBuf>> {
 /// expected schema.
 pub fn parse_agent_wrap(text: &str) -> Result<git_sshripped_ssh_agent_models::AgentWrappedKey> {
     toml::from_str(text).context("failed to parse agent-wrap TOML")
+}
+
+// ---------------------------------------------------------------------------
+// Filter install marker
+//
+// The marker lives alongside the unlock session in the git common directory
+// so it is:
+//   - local to the machine (never committed)
+//   - shared across linked worktrees for the main-worktree case
+//   - discarded whenever the common dir is nuked
+// ---------------------------------------------------------------------------
+
+/// Path to the filter-install marker for a given common dir.
+#[must_use]
+pub fn filter_marker_file(common_dir: &Path) -> PathBuf {
+    common_dir
+        .join("git-sshripped")
+        .join("session")
+        .join("filters-installed.json")
+}
+
+/// Read the filter-install marker if present.
+///
+/// Returns `None` when the marker is absent or malformed. A malformed marker
+/// is not fatal -- callers treat it the same as a missing marker and fall
+/// through to a full reinstall.
+#[must_use]
+pub fn read_filter_marker(common_dir: &Path) -> Option<FilterInstallMarker> {
+    profiling::scope!("read_filter_marker");
+    let path = filter_marker_file(common_dir);
+    let text = fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<FilterInstallMarker>(&text).ok()
+}
+
+/// Persist the filter-install marker.
+///
+/// Any I/O or serialization failure is non-fatal -- the marker is a cache
+/// hint, not a source of truth. Callers therefore get `()` back and do not
+/// propagate errors from this function.
+pub fn write_filter_marker(common_dir: &Path, marker: &FilterInstallMarker) {
+    profiling::scope!("write_filter_marker");
+    let path = filter_marker_file(common_dir);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string_pretty(marker) {
+        let _ = fs::write(&path, text);
+    }
+}
+
+/// Remove the filter-install marker, if present.
+///
+/// Callers use this when they know filter configuration has been touched
+/// outside of [`install_git_filters`] (e.g. the `install` subcommand or any
+/// direct `git config --unset` performed elsewhere).
+pub fn clear_filter_marker(common_dir: &Path) {
+    profiling::scope!("clear_filter_marker");
+    let path = filter_marker_file(common_dir);
+    let _ = fs::remove_file(path);
 }

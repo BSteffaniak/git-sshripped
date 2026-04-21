@@ -57,6 +57,39 @@ pub struct RepositoryLocalConfig {
     pub github_private_source_hard_fail: Option<bool>,
 }
 
+/// Marker recording the most recently installed Git filter configuration.
+///
+/// Written by `install_git_filters` after every successful run. Read at the
+/// top of the `unlock` fast path so we can skip the five `git config` writes
+/// (and the related per-file working-tree scan) when the configuration is
+/// known to already match.
+///
+/// The marker is intentionally conservative: the slightest mismatch between
+/// the recorded and current values forces a full reinstall. Schema drift is
+/// handled via [`Self::SCHEMA_VERSION`] — bumping it invalidates every
+/// existing marker on disk.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FilterInstallMarker {
+    /// Schema version for the marker layout.
+    pub version: u32,
+    /// Absolute path to the binary whose path was embedded in the filter
+    /// entries (`filter.git-sshripped.{process,clean,smudge}`,
+    /// `diff.git-sshripped.textconv`).
+    pub bin_path: String,
+    /// Whether the filters were written to the worktree-scoped config (i.e.
+    /// `git config --worktree`) or the local config (`git config --local`).
+    pub linked_worktree: bool,
+    /// Absolute path to the working-tree root at the time of installation.
+    /// Used to detect bind-mount / moved-repo situations so we reinstall.
+    pub repo_root: String,
+}
+
+impl FilterInstallMarker {
+    /// Current marker schema version. Bump to force a one-time reinstall on
+    /// every repository after upgrading.
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
 impl Default for RepositoryManifest {
     fn default() -> Self {
         Self {

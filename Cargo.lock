@@ -1036,6 +1036,7 @@ dependencies = [
  "git_sshripped_repository_models",
  "git_sshripped_ssh_agent_models",
  "profiling",
+ "serde_json",
  "toml 0.8.23",
 ]
 
