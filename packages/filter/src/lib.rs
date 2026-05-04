@@ -2,7 +2,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use git_sshripped_encryption::{decrypt, encrypt, is_encrypted};
 use git_sshripped_encryption_models::EncryptionAlgorithm;
 
@@ -11,7 +11,8 @@ use git_sshripped_encryption_models::EncryptionAlgorithm;
 /// # Errors
 ///
 /// Returns an error if the repository is locked (no key available) and the
-/// content is unencrypted, or if encryption itself fails.
+/// content is unencrypted, if encrypted input is not valid for `path`, or if
+/// encryption itself fails.
 pub fn clean(
     algorithm: EncryptionAlgorithm,
     repo_key: Option<&[u8]>,
@@ -20,6 +21,13 @@ pub fn clean(
 ) -> Result<Vec<u8>> {
     profiling::scope!("clean");
     if is_encrypted(content) {
+        if let Some(key) = repo_key {
+            decrypt(key, path, content).with_context(|| {
+                format!(
+                    "protected file '{path}' contains encrypted content that is not valid for this path"
+                )
+            })?;
+        }
         return Ok(content.to_vec());
     }
 

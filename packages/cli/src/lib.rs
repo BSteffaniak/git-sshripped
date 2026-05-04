@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use git_sshripped_cli_models::InitOptions;
+use git_sshripped_encryption::decrypt;
 use git_sshripped_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
 use git_sshripped_filter::{clean, diff, smudge};
 use git_sshripped_recipient::{
@@ -719,7 +720,7 @@ fn enforce_verify_clean_for_sensitive_actions(
     if !manifest.require_verify_strict_clean_for_rotate_revoke {
         return Ok(());
     }
-    let failures = verify_failures(repo_root)?;
+    let failures = strict_verify_failures(repo_root)?;
     if failures.is_empty() {
         return Ok(());
     }
@@ -3947,12 +3948,53 @@ fn verify_failures(repo_root: &std::path::Path) -> Result<Vec<String>> {
     Ok(failures)
 }
 
+fn strict_verify_failures(repo_root: &std::path::Path) -> Result<Vec<String>> {
+    let files = protected_tracked_files(repo_root)?;
+    let manifest = read_manifest(repo_root)?;
+    let common_dir = current_common_dir()?;
+    let key_result = repo_key_from_session_in(&common_dir, Some(&manifest));
+    let mut failures = Vec::new();
+
+    for path in files {
+        let blob = git_show_index_path(repo_root, &path)?;
+        if !blob.starts_with(&ENCRYPTED_MAGIC) {
+            failures.push(format!("plaintext protected file in index: {path}"));
+            continue;
+        }
+
+        match &key_result {
+            Ok(Some(key)) => {
+                if let Err(err) = decrypt(key, &path, &blob) {
+                    failures.push(format!(
+                        "encrypted protected file does not decrypt for current path {path}: {err:#}"
+                    ));
+                }
+            }
+            Ok(None) => failures.push(format!(
+                "encrypted protected file cannot be path-verified while repository is locked: {path}"
+            )),
+            Err(err) => failures.push(format!(
+                "encrypted protected file cannot be path-verified due to unlock session error for {path}: {err:#}"
+            )),
+        }
+    }
+
+    Ok(failures)
+}
+
 fn cmd_verify(strict: bool, json: bool) -> Result<()> {
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
     let strict = strict || manifest.strict_mode;
 
-    let failures = verify_failures(&repo_root)?;
+    let failures = if strict {
+        strict_verify_failures(&repo_root)?
+    } else {
+        verify_failures(&repo_root)?
+            .into_iter()
+            .map(|path| format!("plaintext protected file in index: {path}"))
+            .collect()
+    };
 
     if !failures.is_empty() {
         if json {
@@ -3965,8 +4007,8 @@ fn cmd_verify(strict: bool, json: bool) -> Result<()> {
             );
         } else {
             println!("verify: FAIL ({})", failures.len());
-            for file in &failures {
-                eprintln!("- plaintext protected file in index: {file}");
+            for failure in &failures {
+                eprintln!("- {failure}");
             }
         }
         anyhow::bail!("verify failed");
@@ -4542,10 +4584,41 @@ fn cmd_clean(path: &str) -> Result<()> {
 
 fn cmd_smudge(path: &str) -> Result<()> {
     profiling::scope!("cmd_smudge");
-    let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = smudge(key.as_deref(), path, &input)?;
+    let output = soft_smudge(path, &input, repo_key_from_session);
     write_stdout_all(&output)
+}
+
+fn soft_smudge(
+    path: &str,
+    content: &[u8],
+    repo_key: impl FnOnce() -> Result<Option<Vec<u8>>>,
+) -> Vec<u8> {
+    if !content.starts_with(&ENCRYPTED_MAGIC) {
+        return content.to_vec();
+    }
+
+    let key = match repo_key() {
+        Ok(key) => key,
+        Err(err) => {
+            warn_soft_smudge(path, &err);
+            return content.to_vec();
+        }
+    };
+
+    match smudge(key.as_deref(), path, content) {
+        Ok(output) => output,
+        Err(err) => {
+            warn_soft_smudge(path, &err);
+            content.to_vec()
+        }
+    }
+}
+
+fn warn_soft_smudge(path: &str, err: &anyhow::Error) {
+    eprintln!(
+        "git-sshripped warning: could not decrypt {path}; leaving encrypted blob in working tree.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
+    );
 }
 
 fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
@@ -4892,17 +4965,21 @@ fn run_filter_command(
     pathname: &str,
     input: &[u8],
 ) -> Result<Vec<u8>> {
-    let manifest = read_manifest(repo_root)?;
-    let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
-
     match command {
-        "clean" => clean(
-            manifest.encryption_algorithm,
-            key.as_deref(),
-            pathname,
-            input,
-        ),
-        "smudge" => smudge(key.as_deref(), pathname, input),
+        "clean" => {
+            let manifest = read_manifest(repo_root)?;
+            let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
+            clean(
+                manifest.encryption_algorithm,
+                key.as_deref(),
+                pathname,
+                input,
+            )
+        }
+        "smudge" => Ok(soft_smudge(pathname, input, || {
+            let manifest = read_manifest(repo_root)?;
+            repo_key_from_session_in(common_dir, Some(&manifest))
+        })),
         _ => anyhow::bail!("unsupported filter command: {command}"),
     }
 }
