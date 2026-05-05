@@ -6,13 +6,20 @@ Deterministic file encryption and decryption for git-sshripped.
 
 This crate implements the core cryptographic operations that keep files
 encrypted at rest in a Git repository. It uses AES-256-SIV for deterministic
-authenticated encryption, deriving a per-file key from the repository key via
-HKDF-SHA256. The file path is bound as authenticated associated data (AAD), so
-a ciphertext only decrypts under the correct path.
+authenticated encryption, deriving key material from the repository key via
+HKDF-SHA256.
 
-Determinism is essential: the same key, path, and plaintext always produce the
-same ciphertext, which allows Git to detect unchanged files and produce
-meaningful diffs.
+Newly encrypted files use the movable AES-SIV format by default: the associated
+data (AAD) is a fixed git-sshripped domain string, so ciphertext can move to a
+new repository-relative path without re-encryption.
+
+The legacy `AesSivV1` format remains supported for path-bound ciphertext. In
+that format, the repository-relative path is used as AAD and ciphertext only
+decrypts under the same path.
+
+Determinism is essential: the same key, algorithm, associated data, and
+plaintext always produce the same ciphertext, which allows Git to detect
+unchanged files and produce meaningful diffs.
 
 ## Key Functions
 

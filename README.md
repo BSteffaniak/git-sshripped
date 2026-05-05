@@ -12,6 +12,7 @@ It is for teams that already use SSH keys and want encryption to fit normal Git 
 
 - SSH-native recipient access using existing SSH public/private keys.
 - Git-transparent encryption through Git filters, so normal `git add`, `git commit`, and `git checkout` behavior still applies.
+- Movable encrypted files by default, with opt-in path binding for patterns that should reject ciphertext moved from another path.
 - Worktree-aware lock/unlock state that behaves consistently across Git worktrees.
 - Built-in checks (`doctor`, `verify --strict`) to catch config issues and plaintext mistakes early.
 
@@ -56,6 +57,9 @@ cargo install git_sshripped_cli
 ```bash
 # in an existing Git repository
 git-sshripped init --strict --pattern "secrets/**" --recipient-key ~/.ssh/id_ed25519.pub
+
+# use --path-binding strict for patterns that should reject encrypted blob moves
+# git-sshripped init --pattern "prod-secrets/**" --path-binding strict --recipient-key ~/.ssh/id_ed25519.pub
 
 # unlock using your SSH private key
 git-sshripped unlock --identity ~/.ssh/id_ed25519
@@ -120,6 +124,37 @@ repo key (raw bytes or 64-char hex).
 
 `init` can be run without recipients. The repo key is stored in a local session until a recipient is added (e.g. via `add-github-user`).
 
+### Movable files and path binding
+
+New encrypted files are movable by default: ciphertext can be checked out at a
+new path and still decrypt. This keeps normal Git file moves from breaking
+checkout, rebase, or branch switching.
+
+For patterns where encrypted blobs must not move between paths, opt into path
+binding:
+
+```bash
+git-sshripped init --pattern "prod-secrets/**" --path-binding strict
+```
+
+or set the attribute manually:
+
+```gitattributes
+prod-secrets/** filter=git-sshripped diff=git-sshripped git-sshripped-path-binding=strict
+```
+
+Path-bound files use the legacy AES-SIV path-bound format. Movable files use
+the movable AES-SIV format. Existing repositories can switch future writes to
+movable mode with:
+
+```bash
+git-sshripped policy set --default-path-binding none
+git-sshripped reencrypt
+```
+
+Use `--default-path-binding strict` to make future writes path-bound unless a
+pattern-level attribute overrides it.
+
 ### Maintenance
 
 - `git-sshripped install`
@@ -133,6 +168,7 @@ repo key (raw bytes or 64-char hex).
 - `git-sshripped policy show|set|verify [--json]`
 - `git-sshripped policy set --require-verify-strict-clean-for-rotate-revoke <true|false>`
 - `git-sshripped policy set --max-source-staleness-hours <hours>`
+- `git-sshripped policy set --default-path-binding <none|strict>`
 - `git-sshripped config set-agent-helper <path>`
 - `git-sshripped config set-github-api-base <url>`
 - `git-sshripped config set-github-web-base <url>`

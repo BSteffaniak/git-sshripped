@@ -131,6 +131,19 @@ pub fn write_local_config(repo_root: &Path, config: &RepositoryLocalConfig) -> R
 ///
 /// Returns an error if the `.gitattributes` file cannot be read or written.
 pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()> {
+    install_gitattributes_with_path_binding(repo_root, patterns, None)
+}
+
+/// Append filter/diff attribute lines with an optional path-binding override.
+///
+/// # Errors
+///
+/// Returns an error if the `.gitattributes` file cannot be read or written.
+pub fn install_gitattributes_with_path_binding(
+    repo_root: &Path,
+    patterns: &[String],
+    path_binding: Option<&str>,
+) -> Result<()> {
     profiling::scope!("install_gitattributes");
     let path = repo_root.join(".gitattributes");
     let mut existing = if path.exists() {
@@ -142,8 +155,8 @@ pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()
 
     for pattern in patterns {
         let line = pattern.strip_prefix('!').map_or_else(
-            || format!("{pattern} filter=git-sshripped diff=git-sshripped"),
-            |negated| format!("{negated} !filter !diff"),
+            || protected_gitattributes_line(pattern, path_binding),
+            |negated| format!("{negated} !filter !diff !git-sshripped-path-binding"),
         );
         if !existing.lines().any(|item| item.trim() == line) {
             if !existing.ends_with('\n') && !existing.is_empty() {
@@ -157,6 +170,17 @@ pub fn install_gitattributes(repo_root: &Path, patterns: &[String]) -> Result<()
     fs::write(&path, existing)
         .with_context(|| format!("failed to write gitattributes {}", path.display()))?;
     Ok(())
+}
+
+fn protected_gitattributes_line(pattern: &str, path_binding: Option<&str>) -> String {
+    path_binding.map_or_else(
+        || format!("{pattern} filter=git-sshripped diff=git-sshripped"),
+        |binding| {
+            format!(
+                "{pattern} filter=git-sshripped diff=git-sshripped git-sshripped-path-binding={binding}"
+            )
+        },
+    )
 }
 
 /// Shell-quote a string so it survives interpretation by the shell.

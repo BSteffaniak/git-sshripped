@@ -33,7 +33,11 @@ single `run()` entry point that the binary (and alias) crates call.
 | `config` | Manage local configuration |
 
 The `clean`, `smudge`, `diff`, and `filter-process` subcommands are low-level
-entry points invoked by Git's filter driver.
+entry points invoked by Git's filter driver. `init --path-binding strict` writes
+`git-sshripped-path-binding=strict` attributes for patterns that should use the
+legacy path-bound format; omitted patterns use the movable format by default.
+`policy set --default-path-binding <none|strict>` changes the manifest default
+for future encryption writes.
 
 ## Usage
 

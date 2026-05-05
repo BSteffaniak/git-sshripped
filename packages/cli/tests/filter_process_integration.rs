@@ -196,7 +196,7 @@ fn filter_process_roundtrip_with_lock_unlock() {
 }
 
 #[test]
-fn checkout_of_path_mismatched_ciphertext_warns_and_leaves_blob() {
+fn path_bound_ciphertext_move_warns_and_leaves_blob() {
     let bin = env!("CARGO_BIN_EXE_git-sshripped");
     let temp = TempDir::new().expect("temp dir should create");
     let repo = temp.path();
@@ -224,6 +224,8 @@ fn checkout_of_path_mismatched_ciphertext_warns_and_leaves_blob() {
         "init",
         "--pattern",
         "secrets/**",
+        "--path-binding",
+        "strict",
         "--recipient-key",
         public_key.to_str().expect("public key path should be utf8"),
     ]));
@@ -317,6 +319,128 @@ fn checkout_of_path_mismatched_ciphertext_warns_and_leaves_blob() {
     );
     assert!(verify_stderr.contains("secrets/two.env"));
     assert!(verify_stderr.contains("does not decrypt for current path"));
+}
+
+#[test]
+fn movable_ciphertext_move_decrypts_at_new_path() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let secret_dir = repo.join("secrets");
+    fs::create_dir_all(&secret_dir).expect("secrets dir should create");
+    fs::write(secret_dir.join("one.env"), b"TOKEN=one\n").expect("secret should write");
+    run_ok(Command::new("git").current_dir(repo).args(["add", "."]));
+    run_ok(Command::new("git").current_dir(repo).args([
+        "commit",
+        "-m",
+        "add movable encrypted secret",
+    ]));
+
+    let encrypted_one = run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["show", "HEAD:secrets/one.env"]),
+    );
+    assert!(encrypted_one.starts_with(b"GSC1"));
+    let moved_blob = repo.join("moved.blob");
+    fs::write(&moved_blob, &encrypted_one).expect("moved blob should write");
+    let blob_id = String::from_utf8(run_ok(Command::new("git").current_dir(repo).args([
+        "hash-object",
+        "-w",
+        "--no-filters",
+        moved_blob.to_str().expect("moved blob path should be utf8"),
+    ])))
+    .expect("blob id should be utf8")
+    .trim()
+    .to_string();
+
+    run_ok(Command::new("git").current_dir(repo).args([
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{blob_id},secrets/two.env"),
+    ]));
+    run_ok(Command::new("git").current_dir(repo).args([
+        "commit",
+        "-m",
+        "simulate movable encrypted move without filters",
+    ]));
+    let moved_head = String::from_utf8(run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["rev-parse", "HEAD"]),
+    ))
+    .expect("moved head should be utf8")
+    .trim()
+    .to_string();
+
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["checkout", "HEAD~1"]),
+    );
+    let checkout = Command::new("git")
+        .current_dir(repo)
+        .args(["checkout", &moved_head])
+        .output()
+        .expect("checkout should execute");
+    assert!(
+        checkout.status.success(),
+        "checkout should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr)
+    );
+    let checkout_stderr = String::from_utf8_lossy(&checkout.stderr);
+    assert!(
+        !checkout_stderr.contains("git-sshripped warning"),
+        "movable ciphertext should not warn: {checkout_stderr}"
+    );
+
+    let moved_worktree =
+        fs::read_to_string(secret_dir.join("two.env")).expect("moved file should decrypt as utf8");
+    assert_eq!(moved_worktree, "TOKEN=one\n");
+    run_ok(
+        Command::new(bin)
+            .current_dir(repo)
+            .args(["verify", "--strict"]),
+    );
 }
 
 #[test]

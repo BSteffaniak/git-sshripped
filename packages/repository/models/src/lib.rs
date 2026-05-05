@@ -94,7 +94,7 @@ impl Default for RepositoryManifest {
     fn default() -> Self {
         Self {
             manifest_version: 1,
-            encryption_algorithm: EncryptionAlgorithm::AesSivV1,
+            encryption_algorithm: EncryptionAlgorithm::AesSivMovableV1,
             strict_mode: false,
             repo_key_id: None,
             min_recipients: 1,

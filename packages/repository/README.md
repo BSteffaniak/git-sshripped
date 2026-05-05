@@ -21,6 +21,9 @@ drivers via `git config`.
   local (non-committed) settings.
 - `install_gitattributes(repo_root, patterns)` -- appends filter/diff
   attributes to `.gitattributes`.
+- `install_gitattributes_with_path_binding(repo_root, patterns, path_binding)` --
+  appends filter/diff attributes with an optional `git-sshripped-path-binding`
+  override.
 - `install_git_filters(repo_root, bin)` -- sets up Git filter configuration
   via `git config --local`.
 

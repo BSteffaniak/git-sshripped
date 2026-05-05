@@ -22,6 +22,8 @@ use aes_siv::aead::generic_array::GenericArray;
 #[cfg(feature = "crypto-aes-siv")]
 use aes_siv::aead::{Aead, KeyInit, Payload};
 
+const MOVABLE_AAD: &[u8] = b"git-sshripped:aes-siv:movable:v1";
+
 #[derive(Debug, Error)]
 pub enum EncryptionError {
     #[error("plaintext does not appear to be encrypted")]
@@ -64,7 +66,18 @@ pub fn encrypt(
     }
 
     match algorithm {
-        EncryptionAlgorithm::AesSivV1 => encrypt_aes_siv(repo_key, path.as_bytes(), plaintext),
+        EncryptionAlgorithm::AesSivV1 => encrypt_aes_siv(
+            repo_key,
+            path.as_bytes(),
+            EncryptionAlgorithm::AesSivV1,
+            plaintext,
+        ),
+        EncryptionAlgorithm::AesSivMovableV1 => encrypt_aes_siv(
+            repo_key,
+            MOVABLE_AAD,
+            EncryptionAlgorithm::AesSivMovableV1,
+            plaintext,
+        ),
     }
 }
 
@@ -80,6 +93,7 @@ pub fn decrypt(repo_key: &[u8], path: &str, encrypted: &[u8]) -> Result<Vec<u8>>
 
     match header.algorithm {
         EncryptionAlgorithm::AesSivV1 => decrypt_aes_siv(repo_key, path.as_bytes(), ciphertext),
+        EncryptionAlgorithm::AesSivMovableV1 => decrypt_aes_siv(repo_key, MOVABLE_AAD, ciphertext),
     }
 }
 
@@ -99,7 +113,12 @@ fn parse_header(input: &[u8]) -> Result<(EncryptedHeader, &[u8])> {
 }
 
 #[cfg(feature = "crypto-aes-siv")]
-fn encrypt_aes_siv(repo_key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+fn encrypt_aes_siv(
+    repo_key: &[u8],
+    aad: &[u8],
+    algorithm: EncryptionAlgorithm,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     let key_material = derive_key_material(repo_key)?;
     let key = GenericArray::from_slice(&key_material);
     let cipher = Aes256SivAead::new(key);
@@ -118,14 +137,19 @@ fn encrypt_aes_siv(repo_key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<
     let mut out = Vec::with_capacity(6 + ciphertext.len());
     out.extend_from_slice(&ENCRYPTED_MAGIC);
     out.push(1);
-    out.push(EncryptionAlgorithm::AesSivV1.id());
+    out.push(algorithm.id());
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
 #[cfg(not(feature = "crypto-aes-siv"))]
-fn encrypt_aes_siv(_repo_key: &[u8], _aad: &[u8], _plaintext: &[u8]) -> Result<Vec<u8>> {
-    Err(EncryptionError::UnsupportedAlgorithm(EncryptionAlgorithm::AesSivV1).into())
+fn encrypt_aes_siv(
+    _repo_key: &[u8],
+    _aad: &[u8],
+    algorithm: EncryptionAlgorithm,
+    _plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    Err(EncryptionError::UnsupportedAlgorithm(algorithm).into())
 }
 
 #[cfg(feature = "crypto-aes-siv")]
@@ -156,7 +180,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const ALGO: EncryptionAlgorithm = EncryptionAlgorithm::AesSivV1;
+    const ALGO: EncryptionAlgorithm = EncryptionAlgorithm::AesSivMovableV1;
+    const PATH_BOUND_ALGO: EncryptionAlgorithm = EncryptionAlgorithm::AesSivV1;
     const KEY: [u8; 32] = [7_u8; 32];
 
     proptest! {
@@ -178,9 +203,17 @@ mod tests {
         #[test]
         fn path_binding_rejects_wrong_path(path_a in "[a-zA-Z0-9_/.-]{1,64}", path_b in "[a-zA-Z0-9_/.-]{1,64}", data in proptest::collection::vec(any::<u8>(), 0..256)) {
             prop_assume!(path_a != path_b);
-            let encrypted = encrypt(ALGO, &KEY, &path_a, &data).expect("encryption should succeed");
+            let encrypted = encrypt(PATH_BOUND_ALGO, &KEY, &path_a, &data).expect("encryption should succeed");
             let wrong = decrypt(&KEY, &path_b, &encrypted);
             prop_assert!(wrong.is_err());
+        }
+
+        #[test]
+        fn movable_encryption_allows_wrong_path(path_a in "[a-zA-Z0-9_/.-]{1,64}", path_b in "[a-zA-Z0-9_/.-]{1,64}", data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            prop_assume!(path_a != path_b);
+            let encrypted = encrypt(ALGO, &KEY, &path_a, &data).expect("encryption should succeed");
+            let moved = decrypt(&KEY, &path_b, &encrypted).expect("movable encrypted content should decrypt after a move");
+            prop_assert_eq!(moved, data);
         }
     }
 

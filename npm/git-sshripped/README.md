@@ -19,8 +19,11 @@ This installs a prebuilt native binary for your platform. No Rust or Cargo neede
 Once installed, `git-sshripped` is available as a command:
 
 ```bash
-# Initialize in a repo
+# Initialize in a repo. Encrypted files are movable by default.
 git-sshripped init --pattern "secrets/**"
+
+# Opt into path binding for patterns that should reject encrypted blob moves.
+git-sshripped init --pattern "prod-secrets/**" --path-binding strict
 
 # Unlock (decrypt files for local development)
 git-sshripped unlock

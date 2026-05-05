@@ -26,9 +26,9 @@ use git_sshripped_recipient::{
 };
 use git_sshripped_recipient_models::{RecipientKey, RecipientSource};
 use git_sshripped_repository::{
-    install_git_filters, install_gitattributes, read_filter_marker, read_github_sources,
-    read_local_config, read_manifest, write_filter_marker, write_github_sources,
-    write_local_config, write_manifest,
+    install_git_filters, install_gitattributes, install_gitattributes_with_path_binding,
+    read_filter_marker, read_github_sources, read_local_config, read_manifest, write_filter_marker,
+    write_github_sources, write_local_config, write_manifest,
 };
 use git_sshripped_repository_models::{
     FilterInstallMarker, GithubSourceRegistry, GithubTeamSource, GithubUserSource,
@@ -52,12 +52,36 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliAlgorithm {
     AesSiv,
+    AesSivPathBound,
 }
 
 impl From<CliAlgorithm> for EncryptionAlgorithm {
     fn from(value: CliAlgorithm) -> Self {
         match value {
-            CliAlgorithm::AesSiv => Self::AesSivV1,
+            CliAlgorithm::AesSiv => Self::AesSivMovableV1,
+            CliAlgorithm::AesSivPathBound => Self::AesSivV1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliPathBinding {
+    None,
+    Strict,
+}
+
+impl CliPathBinding {
+    const fn as_attr_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Strict => "strict",
+        }
+    }
+
+    const fn default_algorithm(self) -> EncryptionAlgorithm {
+        match self {
+            Self::None => EncryptionAlgorithm::AesSivMovableV1,
+            Self::Strict => EncryptionAlgorithm::AesSivV1,
         }
     }
 }
@@ -101,6 +125,8 @@ enum PolicyCommand {
         require_verify_strict_clean_for_rotate_revoke: Option<bool>,
         #[arg(long)]
         max_source_staleness_hours: Option<u64>,
+        #[arg(long, value_enum)]
+        default_path_binding: Option<CliPathBinding>,
     },
 }
 
@@ -111,6 +137,8 @@ enum Command {
         patterns: Vec<String>,
         #[arg(long, value_enum, default_value_t = CliAlgorithm::AesSiv)]
         algorithm: CliAlgorithm,
+        #[arg(long, value_enum, default_value_t = CliPathBinding::None)]
+        path_binding: CliPathBinding,
         #[arg(long = "recipient-key")]
         recipient_keys: Vec<String>,
         #[arg(long = "github-keys-url")]
@@ -352,12 +380,14 @@ fn dispatch_command(command: Command) -> Result<()> {
         Command::Init {
             patterns,
             algorithm,
+            path_binding,
             recipient_keys,
             github_keys_urls,
             strict,
         } => cmd_init(
             &patterns,
             algorithm,
+            path_binding,
             recipient_keys,
             github_keys_urls,
             strict,
@@ -1096,6 +1126,7 @@ fn fingerprint_in_other_sources(
 fn cmd_init(
     patterns: &[String],
     algorithm: CliAlgorithm,
+    path_binding: CliPathBinding,
     recipient_keys: Vec<String>,
     github_keys_urls: Vec<String>,
     strict: bool,
@@ -1117,7 +1148,9 @@ fn cmd_init(
     };
 
     write_manifest(&repo_root, &manifest)?;
-    install_gitattributes(&repo_root, patterns)?;
+    let path_binding_attr =
+        (path_binding == CliPathBinding::Strict).then_some(path_binding.as_attr_value());
+    install_gitattributes_with_path_binding(&repo_root, patterns, path_binding_attr)?;
     let identity = current_worktree_identity(&common_dir)?;
     install_filters_and_update_marker(&repo_root, &identity)?;
 
@@ -1181,6 +1214,7 @@ fn cmd_init(
 
     println!("initialized git-sshripped in {}", repo_root.display());
     println!("algorithm: {:?}", manifest.encryption_algorithm);
+    println!("path_binding: {path_binding:?}");
     println!("strict_mode: {}", manifest.strict_mode);
     println!("patterns: {}", patterns.join(", "));
     println!("recipients: {}", recipients.len());
@@ -3290,97 +3324,130 @@ fn cmd_config(command: ConfigCommand) -> Result<()> {
 fn cmd_policy(command: PolicyCommand) -> Result<()> {
     let repo_root = current_repo_root()?;
     match command {
-        PolicyCommand::Show { json } => {
-            let manifest = read_manifest(&repo_root)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&manifest)?);
-            } else {
-                println!("policy: min_recipients {}", manifest.min_recipients);
-                println!(
-                    "policy: allowed_key_types {}",
-                    manifest.allowed_key_types.join(", ")
-                );
-                println!(
-                    "policy: require_doctor_clean_for_rotate {}",
-                    manifest.require_doctor_clean_for_rotate
-                );
-                println!(
-                    "policy: require_verify_strict_clean_for_rotate_revoke {}",
-                    manifest.require_verify_strict_clean_for_rotate_revoke
-                );
-                println!(
-                    "policy: max_source_staleness_hours {}",
-                    manifest
-                        .max_source_staleness_hours
-                        .map_or_else(|| "none".to_string(), |v| v.to_string())
-                );
-            }
-            Ok(())
-        }
-        PolicyCommand::Verify { json } => {
-            let manifest = read_manifest(&repo_root)?;
-            let common_dir = current_common_dir()?;
-            let failures = collect_doctor_failures(&repo_root, &common_dir, &manifest)?;
-            let ok = failures.is_empty();
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": ok,
-                        "failures": failures,
-                    }))?
-                );
-            } else if ok {
-                println!("policy verify: OK");
-            } else {
-                println!("policy verify: FAIL ({})", failures.len());
-                for failure in &failures {
-                    eprintln!("- {failure}");
-                }
-            }
-            if ok {
-                Ok(())
-            } else {
-                anyhow::bail!("policy verification failed")
-            }
-        }
+        PolicyCommand::Show { json } => cmd_policy_show(&repo_root, json),
+        PolicyCommand::Verify { json } => cmd_policy_verify(&repo_root, json),
         PolicyCommand::Set {
             min_recipients,
             allow_key_types,
             require_doctor_clean_for_rotate,
             require_verify_strict_clean_for_rotate_revoke,
             max_source_staleness_hours,
-        } => {
-            let mut manifest = read_manifest(&repo_root)?;
-            if let Some(min) = min_recipients {
-                manifest.min_recipients = min;
-            }
-            if !allow_key_types.is_empty() {
-                manifest.allowed_key_types = allow_key_types;
-            }
-            if let Some(required) = require_doctor_clean_for_rotate {
-                manifest.require_doctor_clean_for_rotate = required;
-            }
-            if let Some(required) = require_verify_strict_clean_for_rotate_revoke {
-                manifest.require_verify_strict_clean_for_rotate_revoke = required;
-            }
-            if let Some(hours) = max_source_staleness_hours {
-                if hours == 0 {
-                    anyhow::bail!("policy set rejected: max_source_staleness_hours must be > 0");
-                }
-                manifest.max_source_staleness_hours = Some(hours);
-            }
-            if manifest.min_recipients == 0 {
-                anyhow::bail!("policy set rejected: min_recipients must be at least 1");
-            }
-            if manifest.allowed_key_types.is_empty() {
-                anyhow::bail!("policy set rejected: allowed_key_types cannot be empty");
-            }
-            write_manifest(&repo_root, &manifest)?;
-            println!("policy set: updated manifest policy");
-            Ok(())
+            default_path_binding,
+        } => cmd_policy_set(
+            &repo_root,
+            PolicySetOptions {
+                min_recipients,
+                allow_key_types,
+                require_doctor_clean_for_rotate,
+                require_verify_strict_clean_for_rotate_revoke,
+                max_source_staleness_hours,
+                default_path_binding,
+            },
+        ),
+    }
+}
+
+fn cmd_policy_show(repo_root: &std::path::Path, json: bool) -> Result<()> {
+    let manifest = read_manifest(repo_root)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+    } else {
+        println!(
+            "policy: default_path_binding {}",
+            default_path_binding_for_algorithm(manifest.encryption_algorithm)
+        );
+        println!("policy: min_recipients {}", manifest.min_recipients);
+        println!(
+            "policy: allowed_key_types {}",
+            manifest.allowed_key_types.join(", ")
+        );
+        println!(
+            "policy: require_doctor_clean_for_rotate {}",
+            manifest.require_doctor_clean_for_rotate
+        );
+        println!(
+            "policy: require_verify_strict_clean_for_rotate_revoke {}",
+            manifest.require_verify_strict_clean_for_rotate_revoke
+        );
+        println!(
+            "policy: max_source_staleness_hours {}",
+            manifest
+                .max_source_staleness_hours
+                .map_or_else(|| "none".to_string(), |v| v.to_string())
+        );
+    }
+    Ok(())
+}
+
+fn cmd_policy_verify(repo_root: &std::path::Path, json: bool) -> Result<()> {
+    let manifest = read_manifest(repo_root)?;
+    let common_dir = current_common_dir()?;
+    let failures = collect_doctor_failures(repo_root, &common_dir, &manifest)?;
+    let ok = failures.is_empty();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": ok,
+                "failures": failures,
+            }))?
+        );
+    } else if ok {
+        println!("policy verify: OK");
+    } else {
+        println!("policy verify: FAIL ({})", failures.len());
+        for failure in &failures {
+            eprintln!("- {failure}");
         }
     }
+    if ok {
+        Ok(())
+    } else {
+        anyhow::bail!("policy verification failed")
+    }
+}
+
+struct PolicySetOptions {
+    min_recipients: Option<usize>,
+    allow_key_types: Vec<String>,
+    require_doctor_clean_for_rotate: Option<bool>,
+    require_verify_strict_clean_for_rotate_revoke: Option<bool>,
+    max_source_staleness_hours: Option<u64>,
+    default_path_binding: Option<CliPathBinding>,
+}
+
+fn cmd_policy_set(repo_root: &std::path::Path, opts: PolicySetOptions) -> Result<()> {
+    let mut manifest = read_manifest(repo_root)?;
+    if let Some(min) = opts.min_recipients {
+        manifest.min_recipients = min;
+    }
+    if !opts.allow_key_types.is_empty() {
+        manifest.allowed_key_types = opts.allow_key_types;
+    }
+    if let Some(required) = opts.require_doctor_clean_for_rotate {
+        manifest.require_doctor_clean_for_rotate = required;
+    }
+    if let Some(required) = opts.require_verify_strict_clean_for_rotate_revoke {
+        manifest.require_verify_strict_clean_for_rotate_revoke = required;
+    }
+    if let Some(binding) = opts.default_path_binding {
+        manifest.encryption_algorithm = binding.default_algorithm();
+    }
+    if let Some(hours) = opts.max_source_staleness_hours {
+        if hours == 0 {
+            anyhow::bail!("policy set rejected: max_source_staleness_hours must be > 0");
+        }
+        manifest.max_source_staleness_hours = Some(hours);
+    }
+    if manifest.min_recipients == 0 {
+        anyhow::bail!("policy set rejected: min_recipients must be at least 1");
+    }
+    if manifest.allowed_key_types.is_empty() {
+        anyhow::bail!("policy set rejected: allowed_key_types cannot be empty");
+    }
+    write_manifest(repo_root, &manifest)?;
+    println!("policy set: updated manifest policy");
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -4250,6 +4317,56 @@ fn git_effective_config(repo_root: &std::path::Path, key: &str) -> Result<Option
     Ok(Some(value))
 }
 
+const fn default_path_binding_for_algorithm(algorithm: EncryptionAlgorithm) -> &'static str {
+    match algorithm {
+        EncryptionAlgorithm::AesSivV1 => "strict",
+        EncryptionAlgorithm::AesSivMovableV1 => "none",
+    }
+}
+
+fn encryption_algorithm_for_path(
+    repo_root: &std::path::Path,
+    manifest: &RepositoryManifest,
+    path: &str,
+) -> Result<EncryptionAlgorithm> {
+    match path_binding_attr(repo_root, path)?.as_deref() {
+        Some("strict" | "path" | "path-bound" | "path_bound") => Ok(EncryptionAlgorithm::AesSivV1),
+        Some("none" | "movable") => Ok(EncryptionAlgorithm::AesSivMovableV1),
+        _ => Ok(manifest.encryption_algorithm),
+    }
+}
+
+fn path_binding_attr(repo_root: &std::path::Path, path: &str) -> Result<Option<String>> {
+    profiling::scope!("path_binding_attr");
+    let output = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["check-attr", "-z", "git-sshripped-path-binding", "--", path])
+        .output()
+        .with_context(|| format!("failed to run git check-attr for {path}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let fields: Vec<&[u8]> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect();
+    let Some(value) = fields.get(2) else {
+        return Ok(None);
+    };
+    let value = std::str::from_utf8(value)
+        .context("git check-attr path-binding value is not utf8")?
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(value.as_str(), "unspecified" | "unset") {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
 fn doctor_check_filters(
     repo_root: &std::path::Path,
     json: bool,
@@ -4576,9 +4693,10 @@ fn cmd_clean(path: &str) -> Result<()> {
     profiling::scope!("cmd_clean");
     let repo_root = current_repo_root()?;
     let manifest = read_manifest(&repo_root)?;
+    let algorithm = encryption_algorithm_for_path(&repo_root, &manifest, path)?;
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = clean(manifest.encryption_algorithm, key.as_deref(), path, &input)?;
+    let output = clean(algorithm, key.as_deref(), path, &input)?;
     write_stdout_all(&output)
 }
 
@@ -4969,12 +5087,8 @@ fn run_filter_command(
         "clean" => {
             let manifest = read_manifest(repo_root)?;
             let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
-            clean(
-                manifest.encryption_algorithm,
-                key.as_deref(),
-                pathname,
-                input,
-            )
+            let algorithm = encryption_algorithm_for_path(repo_root, &manifest, pathname)?;
+            clean(algorithm, key.as_deref(), pathname, input)
         }
         "smudge" => Ok(soft_smudge(pathname, input, || {
             let manifest = read_manifest(repo_root)?;

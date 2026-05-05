@@ -13,8 +13,8 @@ crates.
 
 - `ENCRYPTED_MAGIC` -- four-byte magic prefix (`GSC1`) that identifies
   encrypted content.
-- `EncryptionAlgorithm` -- algorithm enum (currently `AesSivV1`) with binary
-  `id()`/`from_id()` round-tripping.
+- `EncryptionAlgorithm` -- algorithm enum (`AesSivV1` legacy path-bound and
+  `AesSivMovableV1` movable) with binary `id()`/`from_id()` round-tripping.
 - `EncryptedHeader` -- the six-byte header (version + algorithm) prepended to
   every ciphertext blob.
 - `EncryptionModelsError` -- error type for unknown algorithms or malformed

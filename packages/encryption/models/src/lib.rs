@@ -9,7 +9,10 @@ pub const ENCRYPTED_MAGIC: [u8; 4] = *b"GSC1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EncryptionAlgorithm {
+    /// Legacy AES-SIV format that binds ciphertext to the repository-relative path.
     AesSivV1,
+    /// AES-SIV format with fixed associated data so encrypted files can move paths.
+    AesSivMovableV1,
 }
 
 impl EncryptionAlgorithm {
@@ -17,6 +20,7 @@ impl EncryptionAlgorithm {
     pub const fn id(self) -> u8 {
         match self {
             Self::AesSivV1 => 1,
+            Self::AesSivMovableV1 => 2,
         }
     }
 
@@ -29,6 +33,7 @@ impl EncryptionAlgorithm {
     pub const fn from_id(id: u8) -> Result<Self, EncryptionModelsError> {
         match id {
             1 => Ok(Self::AesSivV1),
+            2 => Ok(Self::AesSivMovableV1),
             _ => Err(EncryptionModelsError::UnknownAlgorithm(id)),
         }
     }
@@ -44,7 +49,7 @@ impl Default for EncryptedHeader {
     fn default() -> Self {
         Self {
             version: 1,
-            algorithm: EncryptionAlgorithm::AesSivV1,
+            algorithm: EncryptionAlgorithm::AesSivMovableV1,
         }
     }
 }
