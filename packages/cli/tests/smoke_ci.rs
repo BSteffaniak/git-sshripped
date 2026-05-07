@@ -1,3 +1,5 @@
+#![cfg(feature = "crypto-aes-siv")]
+
 use std::fs;
 use std::process::Command;
 
