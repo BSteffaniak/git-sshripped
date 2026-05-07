@@ -144,13 +144,21 @@ prod-secrets/** filter=git-sshripped diff=git-sshripped git-sshripped-path-bindi
 ```
 
 Path-bound files use the legacy AES-SIV path-bound format. Movable files use
-the movable AES-SIV format. Existing repositories can switch future writes to
-movable mode with:
+the movable AES-SIV format. Existing repositories initialized before movable
+mode was the default can migrate by flipping the manifest default for future
+writes and re-encrypting the files already tracked at HEAD:
 
 ```bash
+git-sshripped unlock
 git-sshripped policy set --default-path-binding none
-git-sshripped reencrypt
+git-sshripped reencrypt   # one-time retrofit: re-clean tracked protected files with the new default
+git commit -m "Switch to movable encryption"
 ```
+
+The `policy set` step only changes the algorithm chosen for *new* clean-filter
+passes; `reencrypt` is what actually rewrites the currently-tracked ciphertext.
+History blobs stay in their original format, which is fine -- decrypt always
+dispatches on the per-blob algorithm ID.
 
 Use `--default-path-binding strict` to make future writes path-bound unless a
 pattern-level attribute overrides it.
