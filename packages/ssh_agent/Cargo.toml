@@ -1,27 +1,27 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "SSH agent integration for git-sshripped"
-edition = { workspace = true }
-keywords = ["agent", "ssh"]
-license = { workspace = true }
-name = "git_sshripped_ssh_agent"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["agent", "ssh"]
+license     = { workspace = true }
+name        = "git_sshripped_ssh_agent"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
+anyhow                         = { workspace = true, features = ["std"] }
+base64                         = { workspace = true, features = ["std"] }
+chacha20poly1305               = { workspace = true }
 git_sshripped_ssh_agent_models = { workspace = true }
-anyhow = { workspace = true, features = ["std"] }
-base64 = { workspace = true, features = ["std"] }
-chacha20poly1305 = { workspace = true }
-hkdf = { workspace = true }
-profiling = { workspace = true }
-rand = { workspace = true }
-sha2 = { workspace = true }
-ssh-agent-client-rs = { workspace = true }
-ssh-key = { workspace = true }
+hkdf                           = { workspace = true }
+profiling                      = { workspace = true }
+rand                           = { workspace = true }
+sha2                           = { workspace = true }
+ssh-agent-client-rs            = { workspace = true }
+ssh-key                        = { workspace = true }
 
 [features]
-default = []
+default          = []
 fail-on-warnings = ["git_sshripped_ssh_agent_models/fail-on-warnings"]

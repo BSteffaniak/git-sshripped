@@ -1,29 +1,29 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "SSH identity domain for git-sshripped"
-edition = { workspace = true }
-keywords = ["identity", "ssh"]
-license = { workspace = true }
-name = "git_sshripped_ssh_identity"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["identity", "ssh"]
+license     = { workspace = true }
+name        = "git_sshripped_ssh_identity"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
+age                               = { workspace = true }
+anyhow                            = { workspace = true, features = ["std"] }
+dirs                              = { workspace = true }
 git_sshripped_ssh_identity_models = { workspace = true }
-age = { workspace = true }
-anyhow = { workspace = true, features = ["std"] }
-dirs = { workspace = true }
-hex = { workspace = true, features = ["std"] }
-profiling = { workspace = true }
-rpassword = { workspace = true }
-ssh-agent-client-rs = { workspace = true }
-ssh-key = { workspace = true }
-wait-timeout = { workspace = true }
+hex                               = { workspace = true, features = ["std"] }
+profiling                         = { workspace = true }
+rpassword                         = { workspace = true }
+ssh-agent-client-rs               = { workspace = true }
+ssh-key                           = { workspace = true }
+wait-timeout                      = { workspace = true }
 
 [features]
-default = []
+default          = []
 fail-on-warnings = ["git_sshripped_ssh_identity_models/fail-on-warnings"]
 
 [dev-dependencies]

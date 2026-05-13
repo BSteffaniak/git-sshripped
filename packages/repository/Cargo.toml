@@ -1,26 +1,26 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "Repository domain for git-sshripped"
-edition = { workspace = true }
-keywords = ["config", "git", "repository", "ssh"]
-license = { workspace = true }
-name = "git_sshripped_repository"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["config", "git", "repository", "ssh"]
+license     = { workspace = true }
+name        = "git_sshripped_repository"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
+anyhow                          = { workspace = true, features = ["std"] }
 git_sshripped_repository_models = { workspace = true }
-git_sshripped_ssh_agent_models = { workspace = true }
-anyhow = { workspace = true, features = ["std"] }
-profiling = { workspace = true }
-serde_json = { workspace = true, features = ["std"] }
-toml = { workspace = true, features = ["display", "parse"] }
+git_sshripped_ssh_agent_models  = { workspace = true }
+profiling                       = { workspace = true }
+serde_json                      = { workspace = true, features = ["std"] }
+toml                            = { workspace = true, features = ["display", "parse"] }
 
 [features]
 default = []
 fail-on-warnings = [
-  "git_sshripped_repository_models/fail-on-warnings",
-  "git_sshripped_ssh_agent_models/fail-on-warnings",
+    "git_sshripped_repository_models/fail-on-warnings",
+    "git_sshripped_ssh_agent_models/fail-on-warnings",
 ]

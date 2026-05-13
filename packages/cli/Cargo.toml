@@ -1,14 +1,14 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "CLI for git-sshripped"
-edition = { workspace = true }
-keywords = ["cli", "git", "ssh"]
-license = { workspace = true }
-name = "git_sshripped_cli"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["cli", "git", "ssh"]
+license     = { workspace = true }
+name        = "git_sshripped_cli"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [lib]
 name = "git_sshripped_cli"
@@ -19,66 +19,66 @@ name = "git-sshripped"
 path = "src/main.rs"
 
 [dependencies]
-git_sshripped_cli_models = { workspace = true }
-git_sshripped_encryption = { workspace = true }
-git_sshripped_encryption_models = { workspace = true }
-git_sshripped_filter = { workspace = true }
-git_sshripped_recipient = { workspace = true }
-git_sshripped_recipient_models = { workspace = true }
-git_sshripped_repository = { workspace = true }
-git_sshripped_repository_models = { workspace = true }
-git_sshripped_ssh_identity = { workspace = true }
+anyhow                            = { workspace = true, features = ["std"] }
+base64                            = { workspace = true, features = ["std"] }
+clap                              = { workspace = true, features = ["derive", "std"] }
+git_sshripped_cli_models          = { workspace = true }
+git_sshripped_encryption          = { workspace = true }
+git_sshripped_encryption_models   = { workspace = true }
+git_sshripped_filter              = { workspace = true }
+git_sshripped_recipient           = { workspace = true }
+git_sshripped_recipient_models    = { workspace = true }
+git_sshripped_repository          = { workspace = true }
+git_sshripped_repository_models   = { workspace = true }
+git_sshripped_ssh_agent           = { workspace = true }
+git_sshripped_ssh_identity        = { workspace = true }
 git_sshripped_ssh_identity_models = { workspace = true }
-git_sshripped_ssh_agent = { workspace = true }
-git_sshripped_worktree = { workspace = true }
-git_sshripped_worktree_models = { workspace = true }
-anyhow = { workspace = true, features = ["std"] }
-base64 = { workspace = true, features = ["std"] }
-clap = { workspace = true, features = ["derive", "std"] }
-hex = { workspace = true, features = ["std"] }
-profiling = { workspace = true }
-rand = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
-serde_json = { workspace = true, features = ["std"] }
-sha2 = { workspace = true }
-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
+git_sshripped_worktree            = { workspace = true }
+git_sshripped_worktree_models     = { workspace = true }
+hex                               = { workspace = true, features = ["std"] }
+profiling                         = { workspace = true }
+rand                              = { workspace = true, features = ["std"] }
+reqwest                           = { workspace = true, features = ["blocking", "rustls-tls"] }
+serde_json                        = { workspace = true, features = ["std"] }
+sha2                              = { workspace = true }
+tracing                           = { workspace = true, optional = true }
+tracing-subscriber                = { workspace = true, optional = true }
 
 [features]
+crypto-aes-siv = ["git_sshripped_encryption/crypto-aes-siv"]
 default = ["crypto-aes-siv"]
 fail-on-warnings = [
-  "git_sshripped_cli_models/fail-on-warnings",
-  "git_sshripped_encryption/fail-on-warnings",
-  "git_sshripped_encryption_models/fail-on-warnings",
-  "git_sshripped_filter/fail-on-warnings",
-  "git_sshripped_recipient/fail-on-warnings",
-  "git_sshripped_recipient_models/fail-on-warnings",
-  "git_sshripped_repository/fail-on-warnings",
-  "git_sshripped_repository_models/fail-on-warnings",
-  "git_sshripped_ssh_agent/fail-on-warnings",
-  "git_sshripped_ssh_identity/fail-on-warnings",
-  "git_sshripped_ssh_identity_models/fail-on-warnings",
-  "git_sshripped_worktree/fail-on-warnings",
-  "git_sshripped_worktree_models/fail-on-warnings",
+    "git_sshripped_cli_models/fail-on-warnings",
+    "git_sshripped_encryption/fail-on-warnings",
+    "git_sshripped_encryption_models/fail-on-warnings",
+    "git_sshripped_filter/fail-on-warnings",
+    "git_sshripped_recipient/fail-on-warnings",
+    "git_sshripped_recipient_models/fail-on-warnings",
+    "git_sshripped_repository/fail-on-warnings",
+    "git_sshripped_repository_models/fail-on-warnings",
+    "git_sshripped_ssh_agent/fail-on-warnings",
+    "git_sshripped_ssh_identity/fail-on-warnings",
+    "git_sshripped_ssh_identity_models/fail-on-warnings",
+    "git_sshripped_worktree/fail-on-warnings",
+    "git_sshripped_worktree_models/fail-on-warnings",
 ]
-crypto-aes-siv = ["git_sshripped_encryption/crypto-aes-siv"]
 # Enable tracing-backed `profiling` spans. When disabled (default), the
 # `profiling` macros compile to no-ops. When enabled, set
 # `GIT_SSHRIPPED_TRACE=1` at runtime to emit span timings to stderr.
 profile-trace = [
-  "profiling/profile-with-tracing",
-  "dep:tracing",
-  "dep:tracing-subscriber",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "profiling/profile-with-tracing",
 ]
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports", "plotters"] }
-proptest = { workspace = true }
-tempfile = { workspace = true }
+proptest  = { workspace = true }
+tempfile  = { workspace = true }
 
 [[bench]]
-name = "unlock"
 harness = false
+name    = "unlock"
 
 [package.metadata.cargo-machete]
 ignored = ["git_sshripped_encryption", "tracing"]

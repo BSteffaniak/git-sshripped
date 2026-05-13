@@ -1,79 +1,79 @@
 [workspace]
 members = [
-  "packages/git_sshripped",
-  "packages/cli",
-  "packages/cli/models",
-  "packages/repository",
-  "packages/repository/models",
-  "packages/recipient",
-  "packages/recipient/models",
-  "packages/worktree",
-  "packages/worktree/models",
-  "packages/encryption",
-  "packages/encryption/models",
-  "packages/filter",
-  "packages/filter/models",
-  "packages/ssh_identity",
-  "packages/ssh_identity/models",
-  "packages/ssh_agent",
-  "packages/ssh_agent/models",
-  "packages/sshrypt-alias",
-  "packages/sshript-alias",
+    "packages/cli",
+    "packages/cli/models",
+    "packages/encryption",
+    "packages/encryption/models",
+    "packages/filter",
+    "packages/filter/models",
+    "packages/git_sshripped",
+    "packages/recipient",
+    "packages/recipient/models",
+    "packages/repository",
+    "packages/repository/models",
+    "packages/ssh_agent",
+    "packages/ssh_agent/models",
+    "packages/ssh_identity",
+    "packages/ssh_identity/models",
+    "packages/sshript-alias",
+    "packages/sshrypt-alias",
+    "packages/worktree",
+    "packages/worktree/models",
 ]
 resolver = "2"
 
 [workspace.package]
-authors = ["Braden Steffaniak"]
-edition = "2024"
-license = "MPL-2.0"
+authors    = ["Braden Steffaniak"]
+edition    = "2024"
+license    = "MPL-2.0"
 repository = "https://github.com/BSteffaniak/git-sshripped"
-version = "0.8.1"
+version    = "0.8.1"
 
 [workspace.dependencies]
-git_sshripped_cli = { version = "0.8.1", path = "packages/cli" }
-git_sshripped_cli_models = { version = "0.8.1", path = "packages/cli/models" }
-git_sshrypt = { version = "0.8.1", path = "packages/sshrypt-alias" }
-git_sshript = { version = "0.8.1", path = "packages/sshript-alias" }
-git_sshripped_encryption = { version = "0.8.1", path = "packages/encryption", default-features = false }
-git_sshripped_encryption_models = { version = "0.8.1", path = "packages/encryption/models" }
-git_sshripped_filter = { version = "0.8.1", path = "packages/filter", default-features = false }
-git_sshripped_filter_models = { version = "0.8.1", path = "packages/filter/models" }
-git_sshripped_recipient = { version = "0.8.1", path = "packages/recipient", default-features = false }
-git_sshripped_recipient_models = { version = "0.8.1", path = "packages/recipient/models" }
-git_sshripped_repository = { version = "0.8.1", path = "packages/repository", default-features = false }
-git_sshripped_repository_models = { version = "0.8.1", path = "packages/repository/models" }
-git_sshripped_ssh_identity = { version = "0.8.1", path = "packages/ssh_identity", default-features = false }
+git_sshripped_cli                 = { version = "0.8.1", path = "packages/cli" }
+git_sshripped_cli_models          = { version = "0.8.1", path = "packages/cli/models" }
+git_sshripped_encryption          = { version = "0.8.1", path = "packages/encryption", default-features = false }
+git_sshripped_encryption_models   = { version = "0.8.1", path = "packages/encryption/models" }
+git_sshripped_filter              = { version = "0.8.1", path = "packages/filter", default-features = false }
+git_sshripped_filter_models       = { version = "0.8.1", path = "packages/filter/models" }
+git_sshripped_recipient           = { version = "0.8.1", path = "packages/recipient", default-features = false }
+git_sshripped_recipient_models    = { version = "0.8.1", path = "packages/recipient/models" }
+git_sshripped_repository          = { version = "0.8.1", path = "packages/repository", default-features = false }
+git_sshripped_repository_models   = { version = "0.8.1", path = "packages/repository/models" }
+git_sshripped_ssh_agent           = { version = "0.8.1", path = "packages/ssh_agent", default-features = false }
+git_sshripped_ssh_agent_models    = { version = "0.8.1", path = "packages/ssh_agent/models" }
+git_sshripped_ssh_identity        = { version = "0.8.1", path = "packages/ssh_identity", default-features = false }
 git_sshripped_ssh_identity_models = { version = "0.8.1", path = "packages/ssh_identity/models" }
-git_sshripped_ssh_agent = { version = "0.8.1", path = "packages/ssh_agent", default-features = false }
-git_sshripped_ssh_agent_models = { version = "0.8.1", path = "packages/ssh_agent/models" }
-git_sshripped_worktree = { version = "0.8.1", path = "packages/worktree", default-features = false }
-git_sshripped_worktree_models = { version = "0.8.1", path = "packages/worktree/models" }
+git_sshripped_worktree            = { version = "0.8.1", path = "packages/worktree", default-features = false }
+git_sshripped_worktree_models     = { version = "0.8.1", path = "packages/worktree/models" }
+git_sshript                       = { version = "0.8.1", path = "packages/sshript-alias" }
+git_sshrypt                       = { version = "0.8.1", path = "packages/sshrypt-alias" }
 
 age = { version = "0.11.1", default-features = false, features = ["ssh"] }
 anyhow = { version = "1.0.98", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
-  "std",
+    "std",
 ] }
 clap = { version = "4.5.40", default-features = false }
 dirs = { version = "6.0.0", default-features = false }
 globset = { version = "0.4.16", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 hkdf = { version = "0.12.4", default-features = false }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 rand = { version = "0.9.0", default-features = false, features = [
-  "std",
-  "thread_rng",
+    "std",
+    "thread_rng",
 ] }
 reqwest = { version = "0.12.9", default-features = false }
 rpassword = { version = "7.3.1", default-features = false }
-proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 serde = { version = "1.0.219", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.140", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 ssh-agent-client-rs = { version = "1.1.2", default-features = false }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
-thiserror = { version = "2.0.12", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
+thiserror = { version = "2.0.12", default-features = false }
 toml = { version = "0.8.20", default-features = false }
 wait-timeout = { version = "0.2.1", default-features = false }
 zeroize = { version = "1.8.1", default-features = false }
@@ -82,9 +82,9 @@ zeroize = { version = "1.8.1", default-features = false }
 profiling = { version = "1.0.17", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
-  "fmt",
-  "env-filter",
-  "std",
+    "env-filter",
+    "fmt",
+    "std",
 ] }
 
 # Benchmarking (dev-dep only; see packages/cli/benches).
@@ -95,6 +95,6 @@ aes-siv = { version = "0.7.0", default-features = false }
 
 [profile.release]
 codegen-units = 1
-lto = false
-opt-level = 3
-strip = "symbols"
+lto           = false
+opt-level     = 3
+strip         = "symbols"

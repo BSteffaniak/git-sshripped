@@ -3,22 +3,22 @@ all-features = true
 
 [licenses]
 allow = [
-  "0BSD",
-  "Apache-2.0",
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "CDLA-Permissive-2.0",
-  "ISC",
-  "MIT",
-  "MPL-2.0",
-  "Unicode-3.0",
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
 ]
 
 [advisories]
 ignore = [
-  # age currently depends on rsa for ssh-rsa recipient support; no upstream fix available yet.
-  # Track: https://rustsec.org/advisories/RUSTSEC-2023-0071
-  "RUSTSEC-2023-0071",
+    # age currently depends on rsa for ssh-rsa recipient support; no upstream fix available yet.
+    # Track: https://rustsec.org/advisories/RUSTSEC-2023-0071
+    "RUSTSEC-2023-0071",
 ]
 
 [bans]
@@ -28,15 +28,15 @@ multiple-versions = "deny"
 # dependency trees brought in by `age` and its i18n stack. We keep this list
 # explicit so new duplicate families fail CI by default.
 skip = [
-  { name = "base64", version = "0.21.7" },
-  { name = "getrandom", version = "0.2.17" },
-  { name = "rand", version = "0.8.5" },
-  { name = "rand_chacha", version = "0.3.1" },
-  { name = "rand_core", version = "0.6.4" },
-  { name = "rustc-hash", version = "1.1.0" },
-  { name = "thiserror", version = "1.0.69" },
-  { name = "thiserror-impl", version = "1.0.69" },
-  { name = "toml", version = "0.5.11" },
-  { name = "windows-sys", version = "0.52.0" },
-  { name = "windows-sys", version = "0.59.0" },
+    { name = "base64", version = "0.21.7" },
+    { name = "getrandom", version = "0.2.17" },
+    { name = "rand", version = "0.8.5" },
+    { name = "rand_chacha", version = "0.3.1" },
+    { name = "rand_core", version = "0.6.4" },
+    { name = "rustc-hash", version = "1.1.0" },
+    { name = "thiserror", version = "1.0.69" },
+    { name = "thiserror-impl", version = "1.0.69" },
+    { name = "toml", version = "0.5.11" },
+    { name = "windows-sys", version = "0.52.0" },
+    { name = "windows-sys", version = "0.59.0" },
 ]

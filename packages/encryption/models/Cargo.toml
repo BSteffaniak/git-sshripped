@@ -1,19 +1,19 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "Encryption models for git-sshripped"
-edition = { workspace = true }
-keywords = ["crypt", "encryption", "git", "models", "ssh"]
-license = { workspace = true }
-name = "git_sshripped_encryption_models"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["crypt", "encryption", "git", "models", "ssh"]
+license     = { workspace = true }
+name        = "git_sshripped_encryption_models"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
+serde     = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [features]
-default = []
+default          = []
 fail-on-warnings = []

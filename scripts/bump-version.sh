@@ -26,7 +26,7 @@ fi
 ARG="$1"
 
 # Read current version from workspace Cargo.toml
-CURRENT=$(grep '^version = ' "$REPO_ROOT/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+CURRENT=$(grep -E '^version[[:space:]]*=' "$REPO_ROOT/Cargo.toml" | head -1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
 
 if [ -z "$CURRENT" ]; then
   echo "error: could not read current version from Cargo.toml"
@@ -71,9 +71,9 @@ echo ""
 # external deps from crates.io never do, so we use that to distinguish them
 # and avoid accidentally bumping an unrelated dependency whose version string
 # happens to match the current project version.
-sed -i.bak \
-  -e "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" \
-  -e "/path = /s/\"$CURRENT\"/\"$NEW_VERSION\"/g" \
+sed -i.bak -E \
+  -e "s/^(version[[:space:]]*=[[:space:]]*)\"$CURRENT\"/\1\"$NEW_VERSION\"/" \
+  -e "/path[[:space:]]*=/s/\"$CURRENT\"/\"$NEW_VERSION\"/g" \
   "$REPO_ROOT/Cargo.toml"
 rm -f "$REPO_ROOT/Cargo.toml.bak"
 echo "  updated Cargo.toml"

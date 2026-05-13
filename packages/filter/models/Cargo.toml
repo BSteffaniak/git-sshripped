@@ -1,18 +1,18 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "Filter models for git-sshripped"
-edition = { workspace = true }
-keywords = ["filter", "git", "models"]
-license = { workspace = true }
-name = "git_sshripped_filter_models"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["filter", "git", "models"]
+license     = { workspace = true }
+name        = "git_sshripped_filter_models"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 
 [features]
-default = []
+default          = []
 fail-on-warnings = []

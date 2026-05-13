@@ -1,24 +1,24 @@
 [package]
-authors = { workspace = true }
-categories = ["command-line-utilities", "development-tools"]
+authors     = { workspace = true }
+categories  = ["command-line-utilities", "development-tools"]
 description = "Git filter domain for git-sshripped"
-edition = { workspace = true }
-keywords = ["clean", "filter", "smudge"]
-license = { workspace = true }
-name = "git_sshripped_filter"
-readme = "README.md"
-repository = { workspace = true }
-version = { workspace = true }
+edition     = { workspace = true }
+keywords    = ["clean", "filter", "smudge"]
+license     = { workspace = true }
+name        = "git_sshripped_filter"
+readme      = "README.md"
+repository  = { workspace = true }
+version     = { workspace = true }
 
 [dependencies]
-git_sshripped_encryption = { workspace = true }
+anyhow                          = { workspace = true, features = ["std"] }
+git_sshripped_encryption        = { workspace = true }
 git_sshripped_encryption_models = { workspace = true }
-anyhow = { workspace = true, features = ["std"] }
-profiling = { workspace = true }
+profiling                       = { workspace = true }
 
 [features]
 default = []
 fail-on-warnings = [
-  "git_sshripped_encryption/fail-on-warnings",
-  "git_sshripped_encryption_models/fail-on-warnings",
+    "git_sshripped_encryption/fail-on-warnings",
+    "git_sshripped_encryption_models/fail-on-warnings",
 ]

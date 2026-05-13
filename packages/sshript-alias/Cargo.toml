@@ -1,14 +1,14 @@
 [package]
-authors.workspace = true
-categories = ["command-line-utilities", "development-tools"]
-description = "Alias for git-sshripped (git_sshripped_cli) — installs as git-sshript"
-edition.workspace = true
-keywords = ["cli", "git", "ssh"]
-license.workspace = true
-name = "git_sshript"
-readme = "README.md"
+authors.workspace    = true
+categories           = ["command-line-utilities", "development-tools"]
+description          = "Alias for git-sshripped (git_sshripped_cli) — installs as git-sshript"
+edition.workspace    = true
+keywords             = ["cli", "git", "ssh"]
+license.workspace    = true
+name                 = "git_sshript"
+readme               = "README.md"
 repository.workspace = true
-version.workspace = true
+version.workspace    = true
 
 [[bin]]
 name = "git-sshript"
@@ -18,5 +18,5 @@ path = "src/main.rs"
 git_sshripped_cli = { workspace = true }
 
 [features]
-default = []
+default          = []
 fail-on-warnings = ["git_sshripped_cli/fail-on-warnings"]
