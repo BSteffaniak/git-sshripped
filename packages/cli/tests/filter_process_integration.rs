@@ -388,46 +388,54 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
     assert!(verify_stderr.contains("secrets/two.env"));
     assert!(verify_stderr.contains("does not decrypt for current path"));
 
-    // Regression: even when manifest.toml is corrupt, git operations on
-    // already-encrypted working-tree blobs must not abort. soft_clean must
-    // never propagate setup errors (manifest read, algorithm lookup, session
-    // load) for the encrypted-passthrough path — the bytes are already
-    // ciphertext, so manifest state is irrelevant.
+    // Regression: when manifest.toml is corrupt, the clean filter must not
+    // propagate setup errors (manifest read, algorithm lookup, session
+    // load) for the *encrypted-passthrough* path — the bytes are already
+    // ciphertext, so manifest state is irrelevant. (Plaintext clean must
+    // still hard-fail on setup errors; silently passing plaintext through
+    // would leak secrets into the index.)
     //
-    // Settle git's stat cache before corrupting the manifest. The recent
-    // `git checkout HEAD~1; git checkout <bad_head>` sequence can leave
-    // `secrets/one.env`'s mtime inside git's racy-clean window, which would
-    // otherwise force the clean filter to re-run on that plaintext file on
-    // every subsequent operation. Plaintext clean *must* hard-fail on setup
-    // errors (otherwise we would leak secrets into the index), so to test
-    // the encrypted-passthrough contract in isolation we first persuade git
-    // that one.env is not racily clean by writing the index back via
-    // `update-index --refresh` while the manifest is still valid. The
-    // command exits non-zero when any tracked file (here `secrets/two.env`,
-    // which holds soft-failed ciphertext) needs an index update; we ignore
-    // that exit status because the side effect we want — settled stat info
-    // for the unmodified plaintext entries — happens regardless.
-    let _ = Command::new("git")
-        .current_dir(repo)
-        .args(["update-index", "--refresh", "-q"])
-        .output()
-        .expect("git update-index --refresh should execute");
+    // We exercise this contract directly by piping path-mismatched
+    // ciphertext into `git-sshripped clean --path secrets/two.env` while
+    // the manifest is corrupt. End-to-end via `git status` is unreliable
+    // here: path-bound encryption is non-deterministic (fresh nonce per
+    // call), so `clean(plaintext)` produces a different blob each time and
+    // git always considers any plaintext protected file in the working
+    // tree (`secrets/one.env`) as needing an index update. Every `git
+    // status` therefore re-runs clean on that plaintext file, which
+    // intentionally hard-fails when the manifest cannot be parsed.
     let manifest_path = repo.join(".git-sshripped").join("manifest.toml");
     fs::write(&manifest_path, b"this is not valid toml = = =\n")
         .expect("corrupt manifest should write");
-    let status_corrupt = Command::new("git")
+    let mut clean_child = Command::new(bin)
         .current_dir(repo)
-        .args(["status"])
-        .output()
-        .expect("git status should execute with corrupt manifest");
-    let status_corrupt_stderr = String::from_utf8_lossy(&status_corrupt.stderr);
+        .args(["clean", "--path", "secrets/two.env"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git-sshripped clean should spawn");
+    {
+        use std::io::Write;
+        clean_child
+            .stdin
+            .as_mut()
+            .expect("clean stdin")
+            .write_all(&encrypted_one)
+            .expect("write ciphertext to clean stdin");
+    }
+    let clean_output = clean_child
+        .wait_with_output()
+        .expect("git-sshripped clean should exit");
+    let clean_stderr = String::from_utf8_lossy(&clean_output.stderr);
     assert!(
-        status_corrupt.status.success(),
-        "git status should succeed even when manifest is corrupt: stderr={status_corrupt_stderr}"
+        clean_output.status.success(),
+        "clean must soft-pass encrypted input even with corrupt manifest: status={} stderr={clean_stderr}",
+        clean_output.status
     );
-    assert!(
-        !status_corrupt_stderr.contains("clean filter 'git-sshripped' failed"),
-        "git status with corrupt manifest must not abort: {status_corrupt_stderr}"
+    assert_eq!(
+        clean_output.stdout, encrypted_one,
+        "clean must pass encrypted input through unchanged"
     );
 }
 
