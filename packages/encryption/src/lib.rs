@@ -48,6 +48,20 @@ pub fn is_encrypted(content: &[u8]) -> bool {
     content.starts_with(&ENCRYPTED_MAGIC)
 }
 
+/// Peek at the encryption algorithm of a ciphertext without decrypting.
+///
+/// Used by the diff/textconv code path to decide whether to require the
+/// original repo path as AAD (path-bound) or to fall back to the constant
+/// movable AAD.
+///
+/// # Errors
+///
+/// Returns an error if `encrypted` does not start with [`ENCRYPTED_MAGIC`]
+/// or carries an unknown algorithm id.
+pub fn algorithm_of(encrypted: &[u8]) -> Result<EncryptionAlgorithm> {
+    parse_header(encrypted).map(|(h, _)| h.algorithm)
+}
+
 /// Encrypt plaintext content for a given file path.
 ///
 /// # Errors
@@ -231,5 +245,42 @@ mod tests {
 
         let decrypted = decrypt(&KEY, path, &encrypted);
         assert!(decrypted.is_err());
+    }
+
+    #[test]
+    fn algorithm_of_round_trips_movable() {
+        let encrypted = encrypt(ALGO, &KEY, "some/path", b"x").expect("encryption should succeed");
+        assert_eq!(
+            algorithm_of(&encrypted).expect("algorithm peek should succeed"),
+            ALGO
+        );
+    }
+
+    #[test]
+    fn algorithm_of_round_trips_path_bound() {
+        let encrypted =
+            encrypt(PATH_BOUND_ALGO, &KEY, "some/path", b"x").expect("encryption should succeed");
+        assert_eq!(
+            algorithm_of(&encrypted).expect("algorithm peek should succeed"),
+            PATH_BOUND_ALGO
+        );
+    }
+
+    #[test]
+    fn algorithm_of_rejects_non_ciphertext() {
+        let plain = b"this is not encrypted";
+        assert!(algorithm_of(plain).is_err());
+        let too_short = b"GSC1";
+        assert!(algorithm_of(too_short).is_err());
+    }
+
+    #[test]
+    fn algorithm_of_rejects_unknown_algorithm_byte() {
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&ENCRYPTED_MAGIC);
+        bad.push(1); // version
+        bad.push(0xFF); // unknown algorithm id
+        bad.extend_from_slice(b"payload");
+        assert!(algorithm_of(&bad).is_err());
     }
 }

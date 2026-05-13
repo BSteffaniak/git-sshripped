@@ -18,6 +18,9 @@ profiling                       = { workspace = true }
 serde_json                      = { workspace = true, features = ["std"] }
 toml                            = { workspace = true, features = ["display", "parse"] }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = []
 fail-on-warnings = [

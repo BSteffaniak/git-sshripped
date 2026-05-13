@@ -231,6 +231,21 @@ is safe to run the harness without setting them.
 - This project is pre-1.0 and should be treated as security-sensitive software.
 - Deterministic encryption is used for Git filter stability and has known leakage tradeoffs.
 - Keep at least two valid recipients configured to reduce lockout risk.
+- **`git diff` / `git log -p` for protected files.** git-sshripped registers a
+  textconv driver so `git diff`, `git log -p`, `git show`, and `git blame`
+  show plaintext for unlocked repos. Git's textconv contract does not pass
+  the original repo path to the textconv command (only a temp file), so
+  path-bound (`AesSivV1`) ciphertext can't be decrypted from the temp file
+  alone. The textconv reverse-resolves the path from the blob hash via
+  `git rev-list --objects --all` and `git ls-files -s`, cached at
+  `<git-dir>/git-sshripped/textconv-paths.cache` and invalidated when HEAD
+  moves. The cache contains only public information (object IDs and repo
+  paths) — never plaintext or key material. git-sshripped explicitly sets
+  `diff.git-sshripped.cachetextconv = false` in `install_git_filters`
+  because git's `cachetextconv` would persist the textconv plaintext output
+  in `.git/objects/info/cache`, leaking decrypted secrets past
+  `git-sshripped lock`. Locked repos pass the raw ciphertext through with a
+  warning rather than aborting the surrounding Git command.
 
 See `SECURITY.md` for the full threat model and operational guidance.
 See `docs/COMPATIBILITY.md` for git-crypt command mapping and migration notes.

@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 use git_sshripped_cli_models::InitOptions;
-use git_sshripped_encryption::decrypt;
+use git_sshripped_encryption::{algorithm_of, decrypt, is_encrypted};
 use git_sshripped_encryption_models::{ENCRYPTED_MAGIC, EncryptionAlgorithm};
-use git_sshripped_filter::{clean, diff, smudge};
+use git_sshripped_filter::{clean, smudge};
 use git_sshripped_recipient::{
     GithubAuthMode, GithubFetchOptions, add_recipient_from_public_key,
     add_recipients_from_github_source_with_options,
@@ -27,8 +27,8 @@ use git_sshripped_recipient::{
 use git_sshripped_recipient_models::{RecipientKey, RecipientSource};
 use git_sshripped_repository::{
     install_git_filters, install_gitattributes, install_gitattributes_with_path_binding,
-    read_filter_marker, read_github_sources, read_local_config, read_manifest, write_filter_marker,
-    write_github_sources, write_local_config, write_manifest,
+    read_filter_marker, read_github_sources, read_local_config, read_manifest, textconv_paths,
+    write_filter_marker, write_github_sources, write_local_config, write_manifest,
 };
 use git_sshripped_repository_models::{
     FilterInstallMarker, GithubSourceRegistry, GithubTeamSource, GithubUserSource,
@@ -326,8 +326,12 @@ enum Command {
         path: String,
     },
     Diff {
+        /// Original repo-relative path. Optional because git's textconv
+        /// invocation does not expose the path; in textconv mode the
+        /// resolver looks it up from the blob hash. Direct invocations
+        /// (`git-sshripped diff --path X`) may still pass it explicitly.
         #[arg(long)]
-        path: String,
+        path: Option<String>,
         /// Temp file provided by git's textconv; if absent, read stdin
         file: Option<String>,
     },
@@ -447,7 +451,7 @@ fn dispatch_command(command: Command) -> Result<()> {
         Command::Verify { strict, json } => cmd_verify(strict, json),
         Command::Clean { path } => cmd_clean(&path),
         Command::Smudge { path } => cmd_smudge(&path),
-        Command::Diff { path, file } => cmd_diff(&path, file.as_deref()),
+        Command::Diff { path, file } => cmd_diff(path.as_deref(), file.as_deref()),
         Command::FilterProcess => cmd_filter_process(),
         Command::Policy { command } => cmd_policy(command),
         Command::Config { command } => cmd_config(command),
@@ -4785,20 +4789,44 @@ fn warn_soft_smudge(path: &str, err: &anyhow::Error) {
     );
 }
 
-fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
+fn cmd_diff(path: Option<&str>, file: Option<&str>) -> Result<()> {
     profiling::scope!("cmd_diff");
-    let input = if let Some(file_path) = file {
-        fs::read(file_path)
-            .with_context(|| format!("failed to read diff input file {file_path}"))?
-    } else {
-        read_stdin_all()?
+
+    let input = match read_diff_input(file) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            // Defense in depth: textconv must never abort git operations.
+            // If we cannot read the input we have nothing meaningful to
+            // emit; warn and exit successfully so git falls back to its
+            // built-in binary diff renderer.
+            eprintln!(
+                "git-sshripped warning: textconv could not read input ({err:#}); emitting empty diff."
+            );
+            return write_stdout_all(b"");
+        }
     };
-    let output = soft_diff(path, &input, repo_key_from_session);
+
+    let candidates = if path.is_none() && is_encrypted(&input) {
+        current_repo_root()
+            .ok()
+            .map(|repo| textconv_paths::resolve_paths(&repo, &input))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let output = soft_diff(path, &candidates, &input, repo_key_from_session);
     write_stdout_all(&output)
 }
 
+fn read_diff_input(file: Option<&str>) -> Result<Vec<u8>> {
+    file.map_or_else(read_stdin_all, |file_path| {
+        fs::read(file_path).with_context(|| format!("failed to read diff input file {file_path}"))
+    })
+}
+
 /// Diff/textconv wrapper that warns instead of failing when an encrypted blob
-/// cannot be decrypted for the current path.
+/// cannot be decrypted.
 ///
 /// `git diff`, `git log -p`, `git show`, and `git blame` invoke this as a
 /// textconv. Hard-failing here aborts the surrounding Git command for any
@@ -4806,47 +4834,122 @@ fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
 /// same class of failure soft-smudge and soft-clean handle). When that
 /// happens we pass the raw ciphertext through so Git can fall back to its
 /// usual binary-diff rendering rather than aborting the operation.
+///
+/// Decrypt-attempt order:
+///   1. `explicit_path` if provided (preserves direct `git-sshripped diff
+///      --path X` invocations).
+///   2. Each entry of `candidate_paths` (from blob-hash reverse lookup).
+///   3. Empty path fallback (decrypts movable ciphertext, which ignores AAD
+///      paths).
+///
+/// First successful decrypt wins. If all attempts fail, emit a single
+/// warning whose wording matches the failure class.
 fn soft_diff(
-    path: &str,
+    explicit_path: Option<&str>,
+    candidate_paths: &[String],
     content: &[u8],
     repo_key: impl FnOnce() -> Result<Option<Vec<u8>>>,
 ) -> Vec<u8> {
-    if !content.starts_with(&ENCRYPTED_MAGIC) {
+    if !is_encrypted(content) {
         return content.to_vec();
     }
 
     let key = match repo_key() {
         Ok(Some(k)) => k,
         Ok(None) => {
-            warn_soft_diff(
-                path,
-                &anyhow::anyhow!("repository is locked; run `git-sshripped unlock`"),
-            );
+            warn_soft_diff_locked();
             return content.to_vec();
         }
         Err(err) => {
-            warn_soft_diff(path, &err);
+            warn_soft_diff_session(&err);
             return content.to_vec();
         }
     };
 
-    match diff(Some(&key), path, content) {
-        Ok(out) => out,
+    let mut last_err: Option<anyhow::Error> = None;
+    if let Some(p) = explicit_path
+        && let Some(plain) = try_decrypt(&key, p, content, &mut last_err)
+    {
+        return plain;
+    }
+    for p in candidate_paths {
+        if let Some(plain) = try_decrypt(&key, p, content, &mut last_err) {
+            return plain;
+        }
+    }
+    if let Some(plain) = try_decrypt(&key, "", content, &mut last_err) {
+        return plain;
+    }
+
+    let algo = algorithm_of(content).ok();
+    warn_soft_diff_undecryptable(algo, explicit_path, candidate_paths, last_err.as_ref());
+    content.to_vec()
+}
+
+fn try_decrypt(
+    key: &[u8],
+    path: &str,
+    content: &[u8],
+    last_err: &mut Option<anyhow::Error>,
+) -> Option<Vec<u8>> {
+    match decrypt(key, path, content) {
+        Ok(plain) => Some(plain),
         Err(err) => {
-            warn_soft_diff(path, &err);
-            content.to_vec()
+            *last_err = Some(err);
+            None
         }
     }
 }
 
-fn warn_soft_diff(path: &str, err: &anyhow::Error) {
-    // Note: git's textconv invocation does not substitute `%f` the way
-    // filter.X.{clean,smudge} do, so `path` here is often the literal `%f`.
-    // We log it for debuggability when callers do supply a real path (e.g.
-    // direct `git-sshripped diff` invocations) but keep the human-facing
-    // sentence path-agnostic.
+fn warn_soft_diff_locked() {
     eprintln!(
-        "git-sshripped warning: could not decrypt encrypted blob for diff/textconv (path arg: {path}); emitting raw ciphertext.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
+        "git-sshripped warning: repository is locked; emitting raw ciphertext for diff/textconv.\nRun `git-sshripped unlock` to view encrypted diffs."
+    );
+}
+
+fn warn_soft_diff_session(err: &anyhow::Error) {
+    eprintln!(
+        "git-sshripped warning: unlock session unavailable for diff/textconv ({err:#}); emitting raw ciphertext."
+    );
+}
+
+fn warn_soft_diff_undecryptable(
+    algorithm: Option<EncryptionAlgorithm>,
+    explicit_path: Option<&str>,
+    candidate_paths: &[String],
+    last_err: Option<&anyhow::Error>,
+) {
+    let reason = last_err.map_or_else(
+        || "no decrypt attempt succeeded".to_string(),
+        |e| format!("{e:#}"),
+    );
+    let detail = match algorithm {
+        Some(EncryptionAlgorithm::AesSivV1) => {
+            let tried = if explicit_path.is_some() || !candidate_paths.is_empty() {
+                let mut paths: Vec<String> = Vec::new();
+                if let Some(p) = explicit_path {
+                    paths.push(p.to_string());
+                }
+                for p in candidate_paths {
+                    paths.push(p.clone());
+                }
+                format!("; tried path(s): {}", paths.join(", "))
+            } else {
+                String::new()
+            };
+            format!(
+                "could not decrypt path-bound (AesSivV1) ciphertext for diff/textconv{tried}.\n\
+                 Path-bound encryption is bound to a specific repo path via authenticated additional data.\n\
+                 Workaround: view manually with `git-sshripped diff --path <repo/path> < <tempfile>`,\n\
+                 or migrate this file to the movable algorithm."
+            )
+        }
+        Some(EncryptionAlgorithm::AesSivMovableV1) | None => {
+            "could not decrypt encrypted blob for diff/textconv".to_string()
+        }
+    };
+    eprintln!(
+        "git-sshripped warning: {detail}\nReason: {reason}\nRun `git-sshripped verify --strict` for details."
     );
 }
 

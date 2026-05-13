@@ -341,24 +341,27 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
         "git status should emit soft-clean warning: {status_stderr}"
     );
 
-    // Regression: textconv (`git diff`, `git log -p`, `git show`, `git blame`)
-    // must not hard-fail on a path-mismatched encrypted blob. Before soft_diff
-    // it would abort the surrounding command with the same aead::Error class
-    // of failure as smudge/clean.
+    // After the soft-clean fix, `git status` keeps working over
+    // path-mismatched ciphertext in the working tree. Now also verify that
+    // textconv (`git diff`, `git log -p`, `git show`, `git blame`) does not
+    // hard-fail on the same blob — and, thanks to the blob-hash path
+    // resolver, actually recovers the plaintext when the same blob is
+    // committed under a path that *does* decrypt (here, the original
+    // `secrets/one.env`).
     let log_patch = Command::new("git")
         .current_dir(repo)
         .args(["log", "-p", "HEAD", "--", "secrets/two.env"])
         .output()
         .expect("git log -p should execute");
+    let log_patch_stdout = String::from_utf8_lossy(&log_patch.stdout);
     let log_patch_stderr = String::from_utf8_lossy(&log_patch.stderr);
     assert!(
         log_patch.status.success(),
         "git log -p should succeed over path-mismatched ciphertext: stderr={log_patch_stderr}"
     );
     assert!(
-        log_patch_stderr
-            .contains("git-sshripped warning: could not decrypt encrypted blob for diff/textconv"),
-        "git log -p should emit soft-diff warning: {log_patch_stderr}"
+        log_patch_stdout.contains("TOKEN=one"),
+        "git log -p should recover plaintext via blob-hash path lookup: stdout={log_patch_stdout}"
     );
 
     let show = Command::new("git")
@@ -366,10 +369,15 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
         .args(["show", &bad_head, "--", "secrets/two.env"])
         .output()
         .expect("git show should execute");
+    let show_stdout = String::from_utf8_lossy(&show.stdout);
     let show_stderr = String::from_utf8_lossy(&show.stderr);
     assert!(
         show.status.success(),
         "git show should succeed over path-mismatched ciphertext: stderr={show_stderr}"
+    );
+    assert!(
+        show_stdout.contains("TOKEN=one"),
+        "git show should recover plaintext via blob-hash path lookup: stdout={show_stdout}"
     );
 
     let (_, verify_stderr) = run_fail(
@@ -472,9 +480,10 @@ fn textconv_soft_fails_when_repository_is_locked() {
         "git log -p should succeed while locked: stderr={log_patch_stderr}"
     );
     assert!(
-        log_patch_stderr
-            .contains("git-sshripped warning: could not decrypt encrypted blob for diff/textconv"),
-        "git log -p should emit soft-diff warning while locked: {log_patch_stderr}"
+        log_patch_stderr.contains(
+            "git-sshripped warning: repository is locked; emitting raw ciphertext for diff/textconv"
+        ),
+        "git log -p should emit locked soft-diff warning: {log_patch_stderr}"
     );
 
     let show = Command::new("git")
@@ -486,6 +495,349 @@ fn textconv_soft_fails_when_repository_is_locked() {
     assert!(
         show.status.success(),
         "git show should succeed while locked: stderr={show_stderr}"
+    );
+}
+
+#[test]
+fn install_git_filters_drops_path_arg_and_disables_cachetextconv() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let textconv = String::from_utf8(run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "--get",
+        "diff.git-sshripped.textconv",
+    ])))
+    .expect("textconv config should be utf8");
+    assert!(
+        !textconv.contains("%f"),
+        "textconv config must not include %f literal: {textconv}"
+    );
+    assert!(
+        !textconv.contains("--path"),
+        "textconv config must not pass --path because git does not substitute it: {textconv}"
+    );
+
+    let cachetextconv = String::from_utf8(run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "--get",
+        "diff.git-sshripped.cachetextconv",
+    ])))
+    .expect("cachetextconv config should be utf8");
+    assert_eq!(
+        cachetextconv.trim(),
+        "false",
+        "cachetextconv must be explicitly disabled to avoid persisting plaintext to .git/"
+    );
+}
+
+#[test]
+fn textconv_decrypts_movable_ciphertext_via_blob_hash_lookup() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let secret_dir = repo.join("secrets");
+    fs::create_dir_all(&secret_dir).expect("secrets dir should create");
+    let plaintext_token = "MOVABLE_TEXTCONV_TOKEN_xyz123";
+    fs::write(
+        secret_dir.join("app.env"),
+        format!("VALUE={plaintext_token}\n"),
+    )
+    .expect("secret should write");
+    run_ok(Command::new("git").current_dir(repo).args(["add", "."]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-m", "add encrypted secret"]),
+    );
+
+    let log_patch = run_ok(Command::new("git").current_dir(repo).args(["log", "-p"]));
+    let log_text = String::from_utf8_lossy(&log_patch);
+    assert!(
+        log_text.contains(plaintext_token),
+        "git log -p should show plaintext for movable ciphertext: {log_text}"
+    );
+}
+
+#[test]
+fn textconv_decrypts_path_bound_ciphertext_via_blob_hash_lookup() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--path-binding",
+        "strict",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let secret_dir = repo.join("secrets");
+    fs::create_dir_all(&secret_dir).expect("secrets dir should create");
+    let plaintext_token = "PATHBOUND_TEXTCONV_TOKEN_abc789";
+    fs::write(
+        secret_dir.join("app.env"),
+        format!("VALUE={plaintext_token}\n"),
+    )
+    .expect("secret should write");
+    run_ok(Command::new("git").current_dir(repo).args(["add", "."]));
+    run_ok(Command::new("git").current_dir(repo).args([
+        "commit",
+        "-m",
+        "add path-bound encrypted secret",
+    ]));
+
+    let log_patch = run_ok(Command::new("git").current_dir(repo).args(["log", "-p"]));
+    let log_text = String::from_utf8_lossy(&log_patch);
+    assert!(
+        log_text.contains(plaintext_token),
+        "git log -p should show plaintext for path-bound ciphertext via blob-hash lookup: {log_text}"
+    );
+}
+
+#[test]
+fn textconv_handles_unknown_blob_with_soft_fail() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--path-binding",
+        "strict",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    // Synthesize a fake encrypted blob (just the magic + algorithm + bytes
+    // that the resolver will not find in any tree). Pipe it via stdin to
+    // `git-sshripped diff` (no --path) and assert it exits 0 with a soft
+    // warning instead of aborting.
+    let mut fake = Vec::new();
+    fake.extend_from_slice(b"GSC1");
+    fake.push(1); // version
+    fake.push(1); // AesSivV1 algorithm id (path-bound)
+    fake.extend_from_slice(&[0xAB; 64]);
+
+    let mut child = std::process::Command::new(bin)
+        .current_dir(repo)
+        .arg("diff")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git-sshripped diff should spawn");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("diff stdin")
+            .write_all(&fake)
+            .expect("write fake blob");
+    }
+    let output = child.wait_with_output().expect("diff should exit");
+    assert!(
+        output.status.success(),
+        "git-sshripped diff must never fail (got status={}, stderr={})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("git-sshripped warning:") && stderr.contains("path-bound"),
+        "stderr should contain path-bound-specific soft-diff warning: {stderr}"
+    );
+    // Raw ciphertext should be passed through unchanged.
+    assert_eq!(
+        output.stdout, fake,
+        "stdout should be the raw ciphertext when decryption fails"
+    );
+}
+
+#[test]
+fn textconv_handles_garbage_stdin_with_soft_fail() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    // No git-sshripped init: just a plain repo. cmd_diff is invoked over
+    // arbitrary garbage; it must return success and pass the bytes through.
+    let mut child = std::process::Command::new(bin)
+        .current_dir(repo)
+        .arg("diff")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git-sshripped diff should spawn");
+    let payload: Vec<u8> = (0..=255u8).collect();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("diff stdin")
+            .write_all(&payload)
+            .expect("write payload");
+    }
+    let output = child.wait_with_output().expect("diff should exit");
+    assert!(
+        output.status.success(),
+        "git-sshripped diff must never fail on garbage input (status={}, stderr={})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout, payload,
+        "stdout must echo plaintext garbage bytes unchanged"
     );
 }
 

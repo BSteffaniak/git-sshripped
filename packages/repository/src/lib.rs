@@ -11,6 +11,8 @@ use git_sshripped_repository_models::{
     FilterInstallMarker, GithubSourceRegistry, RepositoryLocalConfig, RepositoryManifest,
 };
 
+pub mod textconv_paths;
+
 #[must_use]
 pub fn metadata_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git-sshripped")
@@ -255,7 +257,15 @@ pub fn install_git_filters(repo_root: &Path, bin: &str, linked_worktree: bool) -
         ),
         (
             "diff.git-sshripped.textconv".to_string(),
-            format!("{quoted} diff --path %f"),
+            format!("{quoted} diff"),
+        ),
+        // git's `cachetextconv` would persist textconv plaintext output in
+        // `.git/objects/info/cache`, leaking decrypted secrets past
+        // `git-sshripped lock`. Force-disable it so a global / system
+        // default cannot turn it on for a git-sshripped repo.
+        (
+            "diff.git-sshripped.cachetextconv".to_string(),
+            "false".to_string(),
         ),
     ];
 
