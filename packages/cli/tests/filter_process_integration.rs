@@ -314,6 +314,33 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
     let moved_worktree = fs::read(secret_dir.join("two.env")).expect("moved file should read");
     assert_eq!(moved_worktree, encrypted_one);
 
+    // Regression: after smudge soft-failed and left ciphertext in the working
+    // tree, `git status` (and any other operation that re-runs the clean
+    // filter on that blob) must keep working. Before the soft-clean fix, the
+    // clean filter would hard-fail on path-mismatched ciphertext and abort
+    // git with `clean filter 'git-sshripped' failed`.
+    let status = Command::new("git")
+        .current_dir(repo)
+        .args(["status"])
+        .output()
+        .expect("git status should execute");
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    let status_stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        status.status.success(),
+        "git status should succeed after soft-failed smudge: stdout={status_stdout} stderr={status_stderr}"
+    );
+    assert!(
+        !status_stderr.contains("clean filter 'git-sshripped' failed"),
+        "git status should not abort with clean filter failure: {status_stderr}"
+    );
+    assert!(
+        status_stderr.contains(
+            "git-sshripped warning: protected file 'secrets/two.env' contains encrypted content that does not decrypt for this path"
+        ),
+        "git status should emit soft-clean warning: {status_stderr}"
+    );
+
     let (_, verify_stderr) = run_fail(
         Command::new(bin)
             .current_dir(repo)

@@ -2,17 +2,22 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use git_sshripped_encryption::{decrypt, encrypt, is_encrypted};
 use git_sshripped_encryption_models::EncryptionAlgorithm;
 
 /// Encrypt content for staging via the Git clean filter.
 ///
+/// Already-encrypted input is passed through unchanged, even if the
+/// ciphertext does not decrypt for `path` (e.g. legacy path-bound blobs that
+/// were moved without re-encryption). Path-mismatched ciphertext is reported
+/// by `verify --strict` rather than blocking everyday Git operations such as
+/// `git status`.
+///
 /// # Errors
 ///
 /// Returns an error if the repository is locked (no key available) and the
-/// content is unencrypted, if encrypted input is not valid for `path`, or if
-/// encryption itself fails.
+/// content is unencrypted, or if encryption itself fails.
 pub fn clean(
     algorithm: EncryptionAlgorithm,
     repo_key: Option<&[u8]>,
@@ -21,13 +26,6 @@ pub fn clean(
 ) -> Result<Vec<u8>> {
     profiling::scope!("clean");
     if is_encrypted(content) {
-        if let Some(key) = repo_key {
-            decrypt(key, path, content).with_context(|| {
-                format!(
-                    "protected file '{path}' contains encrypted content that is not valid for this path"
-                )
-            })?;
-        }
         return Ok(content.to_vec());
     }
 

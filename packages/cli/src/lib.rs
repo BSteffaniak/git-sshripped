@@ -4696,8 +4696,34 @@ fn cmd_clean(path: &str) -> Result<()> {
     let algorithm = encryption_algorithm_for_path(&repo_root, &manifest, path)?;
     let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = clean(algorithm, key.as_deref(), path, &input)?;
+    let output = soft_clean(algorithm, key.as_deref(), path, &input)?;
     write_stdout_all(&output)
+}
+
+/// Clean filter wrapper that warns instead of failing when an already-encrypted
+/// blob in the working tree does not decrypt for the current path.
+///
+/// This mirrors `soft_smudge`: if smudge soft-fails on a path-mismatched
+/// ciphertext (leaving the encrypted blob in the working tree), subsequent
+/// `git status` / `git add` invocations would otherwise re-run clean on that
+/// same blob and hard-fail, blocking everyday Git operations. Warning instead
+/// keeps the workflow alive; `verify --strict` remains the authoritative
+/// diagnostic for path-mismatched ciphertext.
+fn soft_clean(
+    algorithm: EncryptionAlgorithm,
+    repo_key: Option<&[u8]>,
+    path: &str,
+    content: &[u8],
+) -> Result<Vec<u8>> {
+    if content.starts_with(&ENCRYPTED_MAGIC)
+        && let Some(key) = repo_key
+        && let Err(err) = decrypt(key, path, content)
+    {
+        eprintln!(
+            "git-sshripped warning: protected file '{path}' contains encrypted content that does not decrypt for this path; passing through unchanged.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
+        );
+    }
+    clean(algorithm, repo_key, path, content)
 }
 
 fn cmd_smudge(path: &str) -> Result<()> {
@@ -5088,7 +5114,7 @@ fn run_filter_command(
             let manifest = read_manifest(repo_root)?;
             let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
             let algorithm = encryption_algorithm_for_path(repo_root, &manifest, pathname)?;
-            clean(algorithm, key.as_deref(), pathname, input)
+            soft_clean(algorithm, key.as_deref(), pathname, input)
         }
         "smudge" => Ok(soft_smudge(pathname, input, || {
             let manifest = read_manifest(repo_root)?;
