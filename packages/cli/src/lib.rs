@@ -4692,12 +4692,19 @@ fn write_stdout_all(bytes: &[u8]) -> Result<()> {
 fn cmd_clean(path: &str) -> Result<()> {
     profiling::scope!("cmd_clean");
     let repo_root = current_repo_root()?;
-    let manifest = read_manifest(&repo_root)?;
-    let algorithm = encryption_algorithm_for_path(&repo_root, &manifest, path)?;
-    let key = repo_key_from_session()?;
     let input = read_stdin_all()?;
-    let output = soft_clean(algorithm, key.as_deref(), path, &input)?;
+    let output = soft_clean(path, &input, || clean_setup(&repo_root, path))?;
     write_stdout_all(&output)
+}
+
+fn clean_setup(
+    repo_root: &std::path::Path,
+    path: &str,
+) -> Result<(EncryptionAlgorithm, Option<Vec<u8>>)> {
+    let manifest = read_manifest(repo_root)?;
+    let algorithm = encryption_algorithm_for_path(repo_root, &manifest, path)?;
+    let key = repo_key_from_session()?;
+    Ok((algorithm, key))
 }
 
 /// Clean filter wrapper that warns instead of failing when an already-encrypted
@@ -4709,21 +4716,34 @@ fn cmd_clean(path: &str) -> Result<()> {
 /// same blob and hard-fail, blocking everyday Git operations. Warning instead
 /// keeps the workflow alive; `verify --strict` remains the authoritative
 /// diagnostic for path-mismatched ciphertext.
+///
+/// For already-encrypted input the wrapper passes the bytes through unchanged
+/// and never propagates `setup` errors (manifest read, algorithm lookup,
+/// session load) — the bytes are already encrypted, so manifest state is
+/// irrelevant. For plaintext input the wrapper still hard-fails on setup
+/// errors and on `clean()`'s locked-repo refusal, since silently passing
+/// plaintext through would leak secrets into the index.
 fn soft_clean(
-    algorithm: EncryptionAlgorithm,
-    repo_key: Option<&[u8]>,
     path: &str,
     content: &[u8],
+    setup: impl FnOnce() -> Result<(EncryptionAlgorithm, Option<Vec<u8>>)>,
 ) -> Result<Vec<u8>> {
-    if content.starts_with(&ENCRYPTED_MAGIC)
-        && let Some(key) = repo_key
-        && let Err(err) = decrypt(key, path, content)
-    {
-        eprintln!(
-            "git-sshripped warning: protected file '{path}' contains encrypted content that does not decrypt for this path; passing through unchanged.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
-        );
+    if content.starts_with(&ENCRYPTED_MAGIC) {
+        if let Ok((_, Some(key))) = setup()
+            && let Err(err) = decrypt(&key, path, content)
+        {
+            warn_soft_clean(path, &err);
+        }
+        return Ok(content.to_vec());
     }
-    clean(algorithm, repo_key, path, content)
+    let (algorithm, key) = setup()?;
+    clean(algorithm, key.as_deref(), path, content)
+}
+
+fn warn_soft_clean(path: &str, err: &anyhow::Error) {
+    eprintln!(
+        "git-sshripped warning: protected file '{path}' contains encrypted content that does not decrypt for this path; passing through unchanged.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
+    );
 }
 
 fn cmd_smudge(path: &str) -> Result<()> {
@@ -4767,15 +4787,67 @@ fn warn_soft_smudge(path: &str, err: &anyhow::Error) {
 
 fn cmd_diff(path: &str, file: Option<&str>) -> Result<()> {
     profiling::scope!("cmd_diff");
-    let key = repo_key_from_session()?;
     let input = if let Some(file_path) = file {
         fs::read(file_path)
             .with_context(|| format!("failed to read diff input file {file_path}"))?
     } else {
         read_stdin_all()?
     };
-    let output = diff(key.as_deref(), path, &input)?;
+    let output = soft_diff(path, &input, repo_key_from_session);
     write_stdout_all(&output)
+}
+
+/// Diff/textconv wrapper that warns instead of failing when an encrypted blob
+/// cannot be decrypted for the current path.
+///
+/// `git diff`, `git log -p`, `git show`, and `git blame` invoke this as a
+/// textconv. Hard-failing here aborts the surrounding Git command for any
+/// commit touching a path-mismatched or otherwise undecryptable blob (the
+/// same class of failure soft-smudge and soft-clean handle). When that
+/// happens we pass the raw ciphertext through so Git can fall back to its
+/// usual binary-diff rendering rather than aborting the operation.
+fn soft_diff(
+    path: &str,
+    content: &[u8],
+    repo_key: impl FnOnce() -> Result<Option<Vec<u8>>>,
+) -> Vec<u8> {
+    if !content.starts_with(&ENCRYPTED_MAGIC) {
+        return content.to_vec();
+    }
+
+    let key = match repo_key() {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            warn_soft_diff(
+                path,
+                &anyhow::anyhow!("repository is locked; run `git-sshripped unlock`"),
+            );
+            return content.to_vec();
+        }
+        Err(err) => {
+            warn_soft_diff(path, &err);
+            return content.to_vec();
+        }
+    };
+
+    match diff(Some(&key), path, content) {
+        Ok(out) => out,
+        Err(err) => {
+            warn_soft_diff(path, &err);
+            content.to_vec()
+        }
+    }
+}
+
+fn warn_soft_diff(path: &str, err: &anyhow::Error) {
+    // Note: git's textconv invocation does not substitute `%f` the way
+    // filter.X.{clean,smudge} do, so `path` here is often the literal `%f`.
+    // We log it for debuggability when callers do supply a real path (e.g.
+    // direct `git-sshripped diff` invocations) but keep the human-facing
+    // sentence path-agnostic.
+    eprintln!(
+        "git-sshripped warning: could not decrypt encrypted blob for diff/textconv (path arg: {path}); emitting raw ciphertext.\nReason: {err:#}\nRun `git-sshripped verify --strict` for details."
+    );
 }
 
 fn cmd_filter_process() -> Result<()> {
@@ -5110,12 +5182,12 @@ fn run_filter_command(
     input: &[u8],
 ) -> Result<Vec<u8>> {
     match command {
-        "clean" => {
+        "clean" => soft_clean(pathname, input, || {
             let manifest = read_manifest(repo_root)?;
             let key = repo_key_from_session_in(common_dir, Some(&manifest))?;
             let algorithm = encryption_algorithm_for_path(repo_root, &manifest, pathname)?;
-            soft_clean(algorithm, key.as_deref(), pathname, input)
-        }
+            Ok((algorithm, key))
+        }),
         "smudge" => Ok(soft_smudge(pathname, input, || {
             let manifest = read_manifest(repo_root)?;
             repo_key_from_session_in(common_dir, Some(&manifest))

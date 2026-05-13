@@ -341,6 +341,37 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
         "git status should emit soft-clean warning: {status_stderr}"
     );
 
+    // Regression: textconv (`git diff`, `git log -p`, `git show`, `git blame`)
+    // must not hard-fail on a path-mismatched encrypted blob. Before soft_diff
+    // it would abort the surrounding command with the same aead::Error class
+    // of failure as smudge/clean.
+    let log_patch = Command::new("git")
+        .current_dir(repo)
+        .args(["log", "-p", "HEAD", "--", "secrets/two.env"])
+        .output()
+        .expect("git log -p should execute");
+    let log_patch_stderr = String::from_utf8_lossy(&log_patch.stderr);
+    assert!(
+        log_patch.status.success(),
+        "git log -p should succeed over path-mismatched ciphertext: stderr={log_patch_stderr}"
+    );
+    assert!(
+        log_patch_stderr
+            .contains("git-sshripped warning: could not decrypt encrypted blob for diff/textconv"),
+        "git log -p should emit soft-diff warning: {log_patch_stderr}"
+    );
+
+    let show = Command::new("git")
+        .current_dir(repo)
+        .args(["show", &bad_head, "--", "secrets/two.env"])
+        .output()
+        .expect("git show should execute");
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(
+        show.status.success(),
+        "git show should succeed over path-mismatched ciphertext: stderr={show_stderr}"
+    );
+
     let (_, verify_stderr) = run_fail(
         Command::new(bin)
             .current_dir(repo)
@@ -348,6 +379,114 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
     );
     assert!(verify_stderr.contains("secrets/two.env"));
     assert!(verify_stderr.contains("does not decrypt for current path"));
+
+    // Regression: even when manifest.toml is corrupt, git operations on
+    // already-encrypted working-tree blobs must not abort. soft_clean must
+    // never propagate setup errors (manifest read, algorithm lookup, session
+    // load) for the encrypted-passthrough path — the bytes are already
+    // ciphertext, so manifest state is irrelevant.
+    let manifest_path = repo.join(".git-sshripped").join("manifest.toml");
+    fs::write(&manifest_path, b"this is not valid toml = = =\n")
+        .expect("corrupt manifest should write");
+    let status_corrupt = Command::new("git")
+        .current_dir(repo)
+        .args(["status"])
+        .output()
+        .expect("git status should execute with corrupt manifest");
+    let status_corrupt_stderr = String::from_utf8_lossy(&status_corrupt.stderr);
+    assert!(
+        status_corrupt.status.success(),
+        "git status should succeed even when manifest is corrupt: stderr={status_corrupt_stderr}"
+    );
+    assert!(
+        !status_corrupt_stderr.contains("clean filter 'git-sshripped' failed"),
+        "git status with corrupt manifest must not abort: {status_corrupt_stderr}"
+    );
+}
+
+#[test]
+fn textconv_soft_fails_when_repository_is_locked() {
+    let bin = env!("CARGO_BIN_EXE_git-sshripped");
+    let temp = TempDir::new().expect("temp dir should create");
+    let repo = temp.path();
+
+    run_ok(Command::new("git").current_dir(repo).args(["init"]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["config", "user.name", "test"]),
+    );
+    run_ok(Command::new("git").current_dir(repo).args([
+        "config",
+        "user.email",
+        "test@example.com",
+    ]));
+
+    let keys_dir = repo.join("keys");
+    fs::create_dir_all(&keys_dir).expect("keys dir should create");
+    let private_key = keys_dir.join("id_ed25519");
+    let public_key = keys_dir.join("id_ed25519.pub");
+    fs::write(&private_key, TEST_PRIVATE_KEY).expect("private key should write");
+    fs::write(&public_key, TEST_PUBLIC_KEY).expect("public key should write");
+
+    run_ok(Command::new(bin).current_dir(repo).args([
+        "init",
+        "--pattern",
+        "secrets/**",
+        "--recipient-key",
+        public_key.to_str().expect("public key path should be utf8"),
+    ]));
+    run_ok(
+        Command::new(bin).current_dir(repo).args([
+            "unlock",
+            "--identity",
+            private_key
+                .to_str()
+                .expect("private key path should be utf8"),
+        ]),
+    );
+
+    let secret_dir = repo.join("secrets");
+    fs::create_dir_all(&secret_dir).expect("secrets dir should create");
+    fs::write(secret_dir.join("app.env"), b"API_KEY=top_secret\n").expect("secret should write");
+    run_ok(Command::new("git").current_dir(repo).args(["add", "."]));
+    run_ok(
+        Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-m", "add encrypted secret"]),
+    );
+
+    run_ok(Command::new(bin).current_dir(repo).args(["lock"]));
+
+    // Regression: textconv must not hard-fail when the repo is locked.
+    // Before soft_diff, `git log -p` over an encrypted blob would abort the
+    // entire log walk with `file 'X' is encrypted and repository is locked`.
+    let log_patch = Command::new("git")
+        .current_dir(repo)
+        .args(["log", "-p"])
+        .output()
+        .expect("git log -p should execute");
+    let log_patch_stderr = String::from_utf8_lossy(&log_patch.stderr);
+    assert!(
+        log_patch.status.success(),
+        "git log -p should succeed while locked: stderr={log_patch_stderr}"
+    );
+    assert!(
+        log_patch_stderr
+            .contains("git-sshripped warning: could not decrypt encrypted blob for diff/textconv"),
+        "git log -p should emit soft-diff warning while locked: {log_patch_stderr}"
+    );
+
+    let show = Command::new("git")
+        .current_dir(repo)
+        .args(["show", "HEAD"])
+        .output()
+        .expect("git show should execute");
+    let show_stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(
+        show.status.success(),
+        "git show should succeed while locked: stderr={show_stderr}"
+    );
 }
 
 #[test]
