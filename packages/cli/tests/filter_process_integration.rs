@@ -393,6 +393,25 @@ fn path_bound_ciphertext_move_warns_and_leaves_blob() {
     // never propagate setup errors (manifest read, algorithm lookup, session
     // load) for the encrypted-passthrough path — the bytes are already
     // ciphertext, so manifest state is irrelevant.
+    //
+    // Settle git's stat cache before corrupting the manifest. The recent
+    // `git checkout HEAD~1; git checkout <bad_head>` sequence can leave
+    // `secrets/one.env`'s mtime inside git's racy-clean window, which would
+    // otherwise force the clean filter to re-run on that plaintext file on
+    // every subsequent operation. Plaintext clean *must* hard-fail on setup
+    // errors (otherwise we would leak secrets into the index), so to test
+    // the encrypted-passthrough contract in isolation we first persuade git
+    // that one.env is not racily clean by writing the index back via
+    // `update-index --refresh` while the manifest is still valid. The
+    // command exits non-zero when any tracked file (here `secrets/two.env`,
+    // which holds soft-failed ciphertext) needs an index update; we ignore
+    // that exit status because the side effect we want — settled stat info
+    // for the unmodified plaintext entries — happens regardless.
+    let _ = Command::new("git")
+        .current_dir(repo)
+        .args(["update-index", "--refresh", "-q"])
+        .output()
+        .expect("git update-index --refresh should execute");
     let manifest_path = repo.join(".git-sshripped").join("manifest.toml");
     fs::write(&manifest_path, b"this is not valid toml = = =\n")
         .expect("corrupt manifest should write");
