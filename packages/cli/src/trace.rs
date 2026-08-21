@@ -19,8 +19,7 @@ pub fn init_trace() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let enabled = std::env::var("GIT_SSHRIPPED_TRACE")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"));
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"));
 
     if !enabled {
         return;
