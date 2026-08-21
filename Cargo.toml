@@ -49,37 +49,41 @@ git_sshripped_worktree_models     = { version = "0.9.0", path = "packages/worktr
 git_sshript                       = { version = "0.9.0", path = "packages/sshript-alias" }
 git_sshrypt                       = { version = "0.9.0", path = "packages/sshrypt-alias" }
 
-age = { version = "0.11.1", default-features = false, features = ["ssh"] }
-anyhow = { version = "1.0.98", default-features = false }
-base64 = { version = "0.22.1", default-features = false }
-chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
-    "std",
+age = { version = "0.12.1", default-features = false, features = ["ssh"] }
+anyhow = { version = "1.0.104", default-features = false }
+base64 = { version = "0.23.1", default-features = false }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = [
+    "alloc",
 ] }
-clap = { version = "4.5.40", default-features = false }
+clap = { version = "4.6.6", default-features = false }
 dirs = { version = "6.0.0", default-features = false }
-globset = { version = "0.4.16", default-features = false }
+globset = { version = "0.4.20", default-features = false }
 hex = { version = "0.4.3", default-features = false }
-hkdf = { version = "0.12.4", default-features = false }
+hkdf = { version = "0.13.0", default-features = false }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
-rand = { version = "0.9.0", default-features = false, features = [
+rand = { version = "0.10.2", default-features = false, features = [
     "std",
     "thread_rng",
 ] }
-reqwest = { version = "0.12.9", default-features = false }
-rpassword = { version = "7.3.1", default-features = false }
-serde = { version = "1.0.219", default-features = false, features = ["std"] }
-serde_json = { version = "1.0.140", default-features = false }
-sha2 = { version = "0.10.8", default-features = false }
-ssh-agent-client-rs = { version = "1.1.2", default-features = false }
+reqwest = { version = "0.13.4", default-features = false }
+rpassword = { version = "7.5.4", default-features = false }
+serde = { version = "1.0.229", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.151", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
+ssh-agent-client-rs = { version = "1.1.3", default-features = false }
 ssh-key = { version = "0.6.7", default-features = false, features = ["std"] }
 tempfile = { version = "3.27.0", default-features = false }
-thiserror = { version = "2.0.12", default-features = false }
-toml = { version = "0.8.20", default-features = false }
+thiserror = { version = "2.0.20", default-features = false }
+toml = { version = "1.1.4", default-features = false, features = [
+    "display",
+    "parse",
+    "serde",
+] }
 wait-timeout = { version = "0.2.1", default-features = false }
-zeroize = { version = "1.8.1", default-features = false }
+zeroize = { version = "1.9.0", default-features = false }
 
 # Profiling / tracing (zero cost when no backend feature is enabled).
-profiling = { version = "1.0.17", default-features = false }
+profiling = { version = "1.0.18", default-features = false }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "env-filter",
@@ -91,7 +95,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 criterion = { version = "0.8.2", default-features = false }
 
 # Crypto backends
-aes-siv = { version = "0.7.0", default-features = false }
+aes-siv = { version = "0.8.0", default-features = false }
 
 [profile.release]
 codegen-units = 1

@@ -38,7 +38,7 @@ git_sshripped_worktree_models     = { workspace = true }
 hex                               = { workspace = true, features = ["std"] }
 profiling                         = { workspace = true }
 rand                              = { workspace = true, features = ["std"] }
-reqwest                           = { workspace = true, features = ["blocking", "rustls-tls"] }
+reqwest                           = { workspace = true, features = ["blocking", "rustls"] }
 serde_json                        = { workspace = true, features = ["std"] }
 sha2                              = { workspace = true }
 tracing                           = { workspace = true, optional = true }

@@ -86,7 +86,7 @@ pub struct GithubTeamMembers {
 fn fingerprint_for_public_key(key_type: &str, key_body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key_type.as_bytes());
-    hasher.update([b':']);
+    hasher.update(b":");
     hasher.update(key_body.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }

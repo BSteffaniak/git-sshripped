@@ -46,7 +46,7 @@ use git_sshripped_worktree::{
     resolve_worktree_identity, write_unlock_session,
 };
 use git_sshripped_worktree_models::UnlockSession;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

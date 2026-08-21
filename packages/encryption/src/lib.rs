@@ -16,11 +16,9 @@ use sha2::Sha256;
 use thiserror::Error;
 
 #[cfg(feature = "crypto-aes-siv")]
-use aes_siv::Aes256SivAead;
-#[cfg(feature = "crypto-aes-siv")]
-use aes_siv::aead::generic_array::GenericArray;
-#[cfg(feature = "crypto-aes-siv")]
 use aes_siv::aead::{Aead, KeyInit, Payload};
+#[cfg(feature = "crypto-aes-siv")]
+use aes_siv::{Aes256SivAead, Key, Nonce};
 
 const MOVABLE_AAD: &[u8] = b"git-sshripped:aes-siv:movable:v1";
 
@@ -134,13 +132,13 @@ fn encrypt_aes_siv(
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     let key_material = derive_key_material(repo_key)?;
-    let key = GenericArray::from_slice(&key_material);
-    let cipher = Aes256SivAead::new(key);
-    let nonce = GenericArray::from_slice(&[0_u8; 16]);
+    let key = Key::<Aes256SivAead>::from(key_material);
+    let cipher = Aes256SivAead::new(&key);
+    let nonce = Nonce::from([0_u8; 16]);
 
     let ciphertext = cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -169,13 +167,13 @@ fn encrypt_aes_siv(
 #[cfg(feature = "crypto-aes-siv")]
 fn decrypt_aes_siv(repo_key: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let key_material = derive_key_material(repo_key)?;
-    let key = GenericArray::from_slice(&key_material);
-    let cipher = Aes256SivAead::new(key);
-    let nonce = GenericArray::from_slice(&[0_u8; 16]);
+    let key = Key::<Aes256SivAead>::from(key_material);
+    let cipher = Aes256SivAead::new(&key);
+    let nonce = Nonce::from([0_u8; 16]);
 
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,

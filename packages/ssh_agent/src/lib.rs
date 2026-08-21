@@ -60,7 +60,7 @@ pub fn fingerprint_for_public_key_line(openssh_line: &str) -> Option<String> {
 
     let mut hasher = Sha256::new();
     hasher.update(key_type.as_bytes());
-    hasher.update([b':']);
+    hasher.update(b":");
     hasher.update(key_body.as_bytes());
     Some(BASE64URL.encode(hasher.finalize()))
 }
@@ -300,7 +300,8 @@ pub fn agent_unwrap_repo_key(
         .decode(&wrapped.encrypted_repo_key)
         .context("invalid base64 in agent-wrap ciphertext")?;
 
-    let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+    let nonce = chacha20poly1305::Nonce::try_from(nonce_bytes.as_slice())
+        .context("invalid nonce length in agent-wrap payload")?;
 
     let signature = sign_with_agent(agent_key, &challenge)?;
     let wrap_key = derive_wrap_key(&signature, &challenge)?;
@@ -308,7 +309,7 @@ pub fn agent_unwrap_repo_key(
     let cipher = ChaCha20Poly1305::new_from_slice(&wrap_key)
         .map_err(|e| anyhow::anyhow!("ChaCha20Poly1305 key init failed: {e}"))?;
 
-    Ok(cipher.decrypt(nonce, ciphertext.as_ref()).ok()) // Tag mismatch returns None: wrong key or non-deterministic agent
+    Ok(cipher.decrypt(&nonce, ciphertext.as_ref()).ok()) // Tag mismatch returns None: wrong key or non-deterministic agent
 }
 
 /// Ask the SSH agent to sign a challenge with the given key, returning the
