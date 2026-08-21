@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build:
@@ -97,8 +98,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -124,8 +126,6 @@ jobs:
 
       - name: Publish platform packages
         if: ${{ !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -uo pipefail
           failed=0
@@ -150,8 +150,6 @@ jobs:
 
       - name: Publish main package
         if: ${{ !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           echo "Publishing git-sshripped..."
           output=$(npm publish ./npm/git-sshripped 2>&1) && exit 0
