@@ -18,7 +18,12 @@ This project is currently pre-1.0 and should be treated as security-sensitive so
 
 - Repository files are encrypted with a repository data key.
 - Repository data key is wrapped per recipient SSH public key.
-- Associated data binds ciphertext to repository-relative path.
+- New ciphertext is movable by default and uses fixed associated data.
+- Path binding is optional; strict paths use repository-relative path bytes as
+  associated data. See [FORMAT.md](docs/FORMAT.md).
+- The clean filter rejects protected plaintext while locked, provided the Git
+  filter/attributes are correctly configured. This is not a guarantee against
+  bypassing filters or committing secrets at unprotected paths.
 
 ## Deterministic leakage
 
@@ -36,4 +41,7 @@ Deterministic encryption is used for Git filter stability. This leaks:
 
 ## Reporting security issues
 
-Report vulnerabilities privately to maintainers before opening public issues.
+Report vulnerabilities privately to [bradensteffaniak@gmail.com](mailto:bradensteffaniak@gmail.com)
+before opening public issues. Include the version, Git version, platform, and a
+synthetic reproduction. Do not send live private keys or repository secrets.
+There is no promised response time or independent-audit claim.

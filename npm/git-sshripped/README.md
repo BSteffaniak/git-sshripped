@@ -16,7 +16,9 @@ This installs a prebuilt native binary for your platform. No Rust or Cargo neede
 
 ### CLI
 
-Once installed, `git-sshripped` is available as a command:
+For direct shell use, install globally with `npm install -g git-sshripped`.
+With the project-local installation above, prefix each command below with
+`npm exec --` (npm scripts already include the local binary on `PATH`):
 
 ```bash
 # Initialize in a repo. Encrypted files are movable by default.
@@ -84,14 +86,14 @@ The binary is resolved in this order:
 
 ## Supported platforms
 
-| Platform | Architecture | npm package |
-|----------|-------------|-------------|
-| macOS | ARM64 (Apple Silicon) | `@git-sshripped/darwin-arm64` |
-| macOS | x64 (Intel) | `@git-sshripped/darwin-x64` |
-| Linux | x64 (glibc) | `@git-sshripped/linux-x64` |
-| Linux | ARM64 (glibc) | `@git-sshripped/linux-arm64` |
-| Linux | x64 (musl/Alpine) | `@git-sshripped/linux-x64-musl` |
-| Windows | x64 | `@git-sshripped/win32-x64` |
+| Platform | Architecture          | npm package                     |
+| -------- | --------------------- | ------------------------------- |
+| macOS    | ARM64 (Apple Silicon) | `@git-sshripped/darwin-arm64`   |
+| macOS    | x64 (Intel)           | `@git-sshripped/darwin-x64`     |
+| Linux    | x64 (glibc)           | `@git-sshripped/linux-x64`      |
+| Linux    | ARM64 (glibc)         | `@git-sshripped/linux-arm64`    |
+| Linux    | x64 (musl/Alpine)     | `@git-sshripped/linux-x64-musl` |
+| Windows  | x64                   | `@git-sshripped/win32-x64`      |
 
 ## License
 

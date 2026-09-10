@@ -16,7 +16,10 @@ It is for teams that already use SSH keys and want encryption to fit normal Git 
 - Worktree-aware lock/unlock state that behaves consistently across Git worktrees.
 - Built-in checks (`doctor`, `verify --strict`) to catch config issues and plaintext mistakes early.
 
-Many alternatives fall short because they require manual encrypt/decrypt steps, do not use SSH as the recipient model, or do not behave cleanly with worktrees.
+Encryption follows configured Git attributes and filters; it does not conceal
+filenames or protect an unlocked working tree from local processes. Existing
+plaintext commits are not retroactively encrypted. Read the [security model](SECURITY.md)
+before adding sensitive data.
 
 ## How it works
 
@@ -30,9 +33,15 @@ Many alternatives fall short because they require manual encrypt/decrypt steps, 
 
 ### Install via npm (no Rust required)
 
+For direct terminal use (Node.js 18 or newer):
+
 ```bash
-npm install git-sshripped
+npm install -g git-sshripped@0.10.0
 ```
+
+For a project-local dependency instead, use `npm install git-sshripped@0.10.0`
+and invoke it with `npm exec -- git-sshripped ...` or from an npm script.
+Installing locally does not put the command on your ordinary shell `PATH`.
 
 To auto-unlock encrypted files after `npm install`, add a postinstall script to your project:
 
@@ -46,11 +55,23 @@ To auto-unlock encrypted files after `npm install`, add a postinstall script to 
 
 The `--soft` flag makes unlock non-fatal so `npm install` succeeds even when the user doesn't have access to encrypted files.
 
-### Install from source
+### Install from crates.io
 
 ```bash
-cargo install git_sshripped_cli
+cargo install git_sshripped_cli --version 0.10.0 --locked
 ```
+
+### Build the current source
+
+```bash
+git clone https://github.com/BSteffaniak/git-sshripped.git
+cd git-sshripped
+cargo install --locked --path packages/cli
+```
+
+The npm wrapper selects a platform binary; see its [package metadata](npm/git-sshripped/package.json)
+for the currently packaged platforms. A source build requires stable Rust and a
+native compiler toolchain. Source `master` and published packages may differ.
 
 ### Initialize a repository
 
@@ -155,7 +176,7 @@ git-sshripped reencrypt   # one-time retrofit: re-clean tracked protected files 
 git commit -m "Switch to movable encryption"
 ```
 
-The `policy set` step only changes the algorithm chosen for *new* clean-filter
+The `policy set` step only changes the algorithm chosen for _new_ clean-filter
 passes; `reencrypt` is what actually rewrites the currently-tracked ciphertext.
 History blobs stay in their original format, which is fine -- decrypt always
 dispatches on the per-blob algorithm ID.
@@ -249,3 +270,11 @@ is safe to run the harness without setting them.
 
 See `SECURITY.md` for the full threat model and operational guidance.
 See `docs/COMPATIBILITY.md` for git-crypt command mapping and migration notes.
+
+## Contributing and license
+
+Include the Git/tool version, platform, and a synthetic reproduction in bug reports.
+For code changes, run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`
+in that order; see [AGENTS.md](AGENTS.md). Never post real secrets.
+
+[Mozilla Public License 2.0](LICENSE).
